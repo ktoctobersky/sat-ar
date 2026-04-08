@@ -786,6 +786,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
       <div class="hud-compass">
         <div class="big" id="headingBig">---&deg;</div>
         <div class="label" id="headingCard">---</div>
+        <div class="label" id="elevationLabel" style="font-size:9px;opacity:0.6">EL ---</div>
       </div>
     </div>
 
@@ -1570,8 +1571,6 @@ function placeEdgeIndicator(sat, pos, pass) {
   // 方位がほぼ合っている場合 → 画面中央にガイド表示
   if (Math.abs(azDiff) < halfFovH) {
     var deviceElevation = 90 - devicePitch;
-    var targetEl = pos.elevation > 0 ? pos.elevation : (pass && pass.maxEl ? pass.maxEl * 0.3 : 5);
-    var elDiff = targetEl - deviceElevation;
 
     var guide = document.createElement('div');
     guide.className = 'sat-guide';
@@ -1585,29 +1584,39 @@ function placeEdgeIndicator(sat, pos, pass) {
     var arrowSymbol, elHint;
     if (pos.elevation > 0) {
       // 可視衛星 → 仰角方向を示す
-      if (elDiff > 10) { arrowSymbol = '\u25B2'; elHint = 'EL ' + pos.elevation.toFixed(0) + '° \u2191'; }
-      else if (elDiff < -10) { arrowSymbol = '\u25BC'; elHint = 'EL ' + pos.elevation.toFixed(0) + '° \u2193'; }
-      else { arrowSymbol = '\u25CF'; elHint = 'EL ' + pos.elevation.toFixed(0) + '°'; }
+      var elDiff = pos.elevation - deviceElevation;
+      if (elDiff > 8) { arrowSymbol = '\u25B2'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2191 (+' + Math.round(elDiff) + '\u00B0)'; }
+      else if (elDiff < -8) { arrowSymbol = '\u25BC'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2193 (' + Math.round(elDiff) + '\u00B0)'; }
+      else { arrowSymbol = '\u25CF'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2714'; }
     } else {
-      // 地平線以下 → 上昇予定を表示
-      arrowSymbol = '\u25B2';
-      elHint = pass ? formatTimeUntil(pass.riseTime) + ' · max ' + pass.maxEl + '°' : 'RISING SOON';
+      // 地平線以下 → 地平線(EL 0°)方向へ誘導
+      var elDiffToHorizon = 0 - deviceElevation; // 地平線との差
+      var timeText = pass ? formatTimeUntil(pass.riseTime) : '?';
+      if (deviceElevation > 8) {
+        arrowSymbol = '\u25BC'; // 上を向きすぎ → 下げて
+        elHint = timeText + ' · \u2193 horizon';
+      } else if (deviceElevation < -8) {
+        arrowSymbol = '\u25B2'; // 下を向きすぎ → 上げて
+        elHint = timeText + ' · \u2191 horizon';
+      } else {
+        arrowSymbol = '\u23F3'; // ⏳ 方位OK・仰角OK → 待つだけ
+        elHint = timeText + ' · max ' + (pass ? pass.maxEl : '?') + '\u00B0';
+      }
     }
 
-    // Y位置: 仰角差に応じて上下に配置
-    if (elDiff > 5) {
-      guide.style.top = Math.max(100, 140 - edgeSlotIndex * 50) + 'px';
-    } else if (elDiff < -5) {
-      guide.style.bottom = Math.max(100, 140 - edgeSlotIndex * 50) + 'px';
-      guide.style.top = 'auto';
-    } else {
-      guide.style.top = (screenH * 0.4 + edgeSlotIndex * 50) + 'px';
+    // Y位置: 画面中央寄り、スロットでずらす
+    guide.style.top = (screenH * 0.35 + edgeSlotIndex * 55) + 'px';
+
+    // デバッグ情報（?debug=1 時のみ）
+    var debugStr = '';
+    if (new URLSearchParams(window.location.search).get('debug') === '1') {
+      debugStr = '<div class="guide-detail" style="opacity:0.5">pitch=' + devicePitch.toFixed(0) + ' devEL=' + deviceElevation.toFixed(0) + ' satEL=' + pos.elevation.toFixed(0) + '</div>';
     }
 
     guide.innerHTML =
       '<div class="guide-arrow">' + arrowSymbol + '</div>' +
       '<div class="guide-name">' + sat.displayName + '</div>' +
-      '<div class="guide-detail">' + elHint + '</div>';
+      '<div class="guide-detail">' + elHint + '</div>' + debugStr;
     document.getElementById('markerLayer').appendChild(guide);
     edgeSlotIndex++;
     return;
@@ -1648,9 +1657,12 @@ function updateOrientationDisplay() {
   var headingBig = document.getElementById('headingBig');
   var headingCard = document.getElementById('headingCard');
   var compassBar = document.getElementById('compassBar');
+  var elevLabel = document.getElementById('elevationLabel');
 
   headingBig.textContent = Math.round(deviceHeading) + '°';
   headingCard.textContent = headingToCardinal(deviceHeading);
+  var devEl = 90 - devicePitch;
+  elevLabel.textContent = 'EL ' + Math.round(devEl) + '°';
 
   var tickWidth = 24;
   var barCenterOffset = compassBar.parentElement.offsetWidth / 2;
