@@ -652,6 +652,44 @@
     margin-top: 1px;
   }
 
+  /* 方位が合った時のガイド表示 */
+  .sat-guide {
+    position: absolute;
+    z-index: 8;
+    pointer-events: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    padding: 8px 16px;
+    border-radius: 4px;
+    background: var(--glass);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    white-space: nowrap;
+    text-align: center;
+    border: 1.5px solid;
+    left: 50%;
+    transform: translateX(-50%);
+    animation: guidePulse 2s ease-in-out infinite;
+  }
+  .sat-guide .guide-name {
+    font-size: 12px;
+    margin-bottom: 2px;
+  }
+  .sat-guide .guide-arrow {
+    font-size: 18px;
+    line-height: 1;
+  }
+  .sat-guide .guide-detail {
+    font-size: 9px;
+    opacity: 0.8;
+    margin-top: 2px;
+  }
+  @keyframes guidePulse {
+    0%, 100% { opacity: 0.9; }
+    50% { opacity: 1; border-width: 2px; }
+  }
+
   .error-toast {
     position: absolute;
     top: 50%;
@@ -1334,6 +1372,7 @@ function render() {
 
   var markerLayer = document.getElementById('markerLayer');
   markerLayer.innerHTML = '';
+  edgeSlotIndex = 0;
 
   // 全衛星の位置を計算してソート
   var satData = [];
@@ -1499,6 +1538,8 @@ function placeSatMarker(sat, pos) {
   return true;
 }
 
+var edgeSlotIndex = 0; // reset each render frame
+
 function placeEdgeIndicator(sat, pos, pass) {
   var azDiff = pos.azimuth - deviceHeading;
   while (azDiff > 180) azDiff -= 360;
@@ -1508,20 +1549,60 @@ function placeEdgeIndicator(sat, pos, pass) {
   var screenH = window.innerHeight;
   var margin = 8;
   var dotColor = getSatColor(sat.type);
+  var halfFovH = cameraFOV / 2;
 
-  var arrow;
-  if (Math.abs(azDiff) < 15) {
-    arrow = '\u25B2'; // ▲ (ほぼ正面)
-  } else if (azDiff < 0) {
-    arrow = '\u25C0'; // ◀
-  } else {
-    arrow = '\u25B6'; // ▶
+  // 方位がほぼ合っている場合 → 画面中央にガイド表示
+  if (Math.abs(azDiff) < halfFovH) {
+    var deviceElevation = 90 - devicePitch;
+    var targetEl = pos.elevation > 0 ? pos.elevation : (pass && pass.maxEl ? pass.maxEl * 0.3 : 5);
+    var elDiff = targetEl - deviceElevation;
+
+    var guide = document.createElement('div');
+    guide.className = 'sat-guide';
+    guide.style.color = dotColor;
+    guide.style.borderColor = dotColor;
+
+    // 画面上のX位置を方位差から計算
+    var xPercent = 50 + (azDiff / halfFovH) * 50;
+    guide.style.left = xPercent + '%';
+
+    var arrowSymbol, elHint;
+    if (pos.elevation > 0) {
+      // 可視衛星 → 仰角方向を示す
+      if (elDiff > 10) { arrowSymbol = '\u25B2'; elHint = 'EL ' + pos.elevation.toFixed(0) + '° \u2191'; }
+      else if (elDiff < -10) { arrowSymbol = '\u25BC'; elHint = 'EL ' + pos.elevation.toFixed(0) + '° \u2193'; }
+      else { arrowSymbol = '\u25CF'; elHint = 'EL ' + pos.elevation.toFixed(0) + '°'; }
+    } else {
+      // 地平線以下 → 上昇予定を表示
+      arrowSymbol = '\u25B2';
+      elHint = pass ? formatTimeUntil(pass.riseTime) + ' · max ' + pass.maxEl + '°' : 'RISING SOON';
+    }
+
+    // Y位置: 仰角差に応じて上下に配置
+    if (elDiff > 5) {
+      guide.style.top = Math.max(100, 140 - edgeSlotIndex * 50) + 'px';
+    } else if (elDiff < -5) {
+      guide.style.bottom = Math.max(100, 140 - edgeSlotIndex * 50) + 'px';
+      guide.style.top = 'auto';
+    } else {
+      guide.style.top = (screenH * 0.4 + edgeSlotIndex * 50) + 'px';
+    }
+
+    guide.innerHTML =
+      '<div class="guide-arrow">' + arrowSymbol + '</div>' +
+      '<div class="guide-name">' + sat.displayName + '</div>' +
+      '<div class="guide-detail">' + elHint + '</div>';
+    document.getElementById('markerLayer').appendChild(guide);
+    edgeSlotIndex++;
+    return;
   }
 
-  var yBase = screenH * 0.4;
-  if (pos.elevation > 0) {
-    yBase = Math.max(120, screenH / 2 - pos.elevation * 3);
-  }
+  // 方位がずれている場合 → 画面端にエッジインジケータ
+  var arrow = azDiff < 0 ? '\u25C0' : '\u25B6';
+
+  // Y位置をスロットでずらして重なり防止
+  var yBase = 160 + edgeSlotIndex * 55;
+  if (yBase > screenH - 180) yBase = 160 + (edgeSlotIndex % 3) * 55;
 
   var detailText = '';
   if (pass && pass.riseTime) {
@@ -1544,6 +1625,7 @@ function placeEdgeIndicator(sat, pos, pass) {
 
   indicator.innerHTML = '<span class="arrow">' + arrow + '</span><div>' + sat.displayName + detailText + '</div>';
   document.getElementById('markerLayer').appendChild(indicator);
+  edgeSlotIndex++;
 }
 
 function updateOrientationDisplay() {
