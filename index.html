@@ -154,6 +154,8 @@
     cursor: pointer;
     font-weight: 600;
     transition: all 0.3s;
+    position: relative;
+    z-index: 10;
   }
   .start-btn:active { transform: scale(0.96); }
   .start-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -545,6 +547,29 @@
 </head>
 <body>
 
+<div id="debugLog" style="position:fixed;top:0;left:0;right:0;max-height:50vh;
+     overflow-y:auto;background:rgba(0,0,0,0.92);color:#0f0;font:11px monospace;
+     padding:8px;z-index:99999;white-space:pre-wrap;word-break:break-all;
+     border-bottom:1px solid #0f0;pointer-events:auto;"></div>
+
+<script>
+function dlog(msg) {
+  var el = document.getElementById('debugLog');
+  var line = new Date().toISOString().substr(11,12) + ' ' + msg;
+  if (el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; }
+  console.log(line);
+}
+
+window.addEventListener('error', function(e) {
+  dlog('ERROR: ' + e.message + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+});
+window.addEventListener('unhandledrejection', function(e) {
+  dlog('REJECTION: ' + (e.reason && e.reason.message || JSON.stringify(e.reason)));
+});
+
+dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navigator.userAgent.substr(0,60));
+</script>
+
 <div id="startScreen">
   <div class="start-eyebrow">Augmented Reality</div>
   <div class="start-title">SAT<span class="dot">.</span>AR</div>
@@ -812,20 +837,33 @@ var isRunning = false;
 // スタート
 // ============================================================
 document.getElementById('startBtn').addEventListener('click', async function() {
+  dlog('startBtn: clicked');
   try {
     var btn = document.getElementById('startBtn');
     btn.disabled = true;
     btn.textContent = 'LOADING...';
 
+    dlog('startBtn: requesting geolocation...');
     await requestGeolocation();
-    await requestOrientation();
-    await requestCamera();
+    dlog('startBtn: geolocation done');
 
+    dlog('startBtn: requesting orientation...');
+    await requestOrientation();
+    dlog('startBtn: orientation done');
+
+    dlog('startBtn: requesting camera...');
+    await requestCamera();
+    dlog('startBtn: camera done');
+
+    dlog('startBtn: switching to mainView');
     document.getElementById('startScreen').style.display = 'none';
     document.getElementById('mainView').style.display = 'block';
 
+    dlog('startBtn: calling startTracking');
     startTracking();
+    dlog('startBtn: startTracking done, app running');
   } catch(err) {
+    dlog('startBtn: ERROR: ' + (err.message || err));
     var btn = document.getElementById('startBtn');
     btn.disabled = false;
     btn.textContent = 'START TRACKING';
@@ -835,7 +873,9 @@ document.getElementById('startBtn').addEventListener('click', async function() {
 
 function requestGeolocation() {
   return new Promise(function(resolve) {
+    dlog('requestGeolocation: start');
     if (!navigator.geolocation) {
+      dlog('requestGeolocation: no geolocation API, using Tokyo default');
       observer = {
         latitude: satellite.degreesToRadians(35.6895),
         longitude: satellite.degreesToRadians(139.6917),
@@ -854,9 +894,11 @@ function requestGeolocation() {
           height: (pos.coords.altitude || 0) / 1000
         };
         observerLabel = pos.coords.latitude.toFixed(3) + 'N, ' + pos.coords.longitude.toFixed(3) + 'E';
+        dlog('requestGeolocation: OK ' + observerLabel);
         resolve();
       },
-      function() {
+      function(err) {
+        dlog('requestGeolocation: failed (' + (err && err.message || err) + '), using Tokyo fallback');
         observer = {
           latitude: satellite.degreesToRadians(35.6895),
           longitude: satellite.degreesToRadians(139.6917),
@@ -865,7 +907,7 @@ function requestGeolocation() {
         observerLabel = 'Tokyo (fallback)';
         resolve();
       },
-      { enableHighAccuracy: true, timeout: 8000 }
+      { enableHighAccuracy: false, timeout: 5000 }
     );
   });
 }
@@ -873,22 +915,41 @@ function requestGeolocation() {
 function requestOrientation() {
   return new Promise(function(resolve, reject) {
     if (typeof DeviceOrientationEvent === 'undefined') {
+      dlog('requestOrientation: DeviceOrientationEvent undefined');
       resolve();
       return;
     }
 
+    var permissionDone = false;
+
     if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      dlog('requestOrientation: iOS13+ permission flow');
       DeviceOrientationEvent.requestPermission()
         .then(function(state) {
+          dlog('requestOrientation: permission state = ' + state);
+          permissionDone = true;
           if (state === 'granted') {
             window.addEventListener('deviceorientation', handleOrientation, true);
             resolve();
           } else {
-            reject(new Error('端末の向きの権限が拒否されました'));
+            reject(new Error('端末の向きの権限が拒否されました: ' + state));
           }
         })
-        .catch(function() { reject(new Error('端末の向きの権限リクエストに失敗しました')); });
+        .catch(function(err) {
+          dlog('requestOrientation: permission error: ' + (err.message || err));
+          permissionDone = true;
+          reject(new Error('端末の向きの権限リクエストに失敗: ' + (err.message || err)));
+        });
+
+      setTimeout(function() {
+        if (!permissionDone) {
+          dlog('requestOrientation: TIMEOUT - permission dialog never resolved, continuing anyway');
+          window.addEventListener('deviceorientation', handleOrientation, true);
+          resolve();
+        }
+      }, 5000);
     } else {
+      dlog('requestOrientation: legacy (no permission needed)');
       window.addEventListener('deviceorientation', handleOrientation, true);
       if ('ondeviceorientationabsolute' in window) {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
@@ -917,30 +978,52 @@ async function requestCamera() {
     throw new Error('このブラウザはカメラをサポートしていません');
   }
 
-  try {
-    var stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      },
-      audio: false
-    });
+  dlog('requestCamera: calling getUserMedia');
+  var constraints = [
+    { video: { facingMode: { exact: 'environment' } }, audio: false },
+    { video: { facingMode: 'environment' }, audio: false },
+    { video: { facingMode: { ideal: 'environment' } }, audio: false },
+    { video: true, audio: false }
+  ];
 
-    var video = document.getElementById('cameraVideo');
-    video.srcObject = stream;
+  var stream = null;
+  var lastErr = null;
+  for (var i = 0; i < constraints.length; i++) {
+    try {
+      dlog('requestCamera: trying constraint ' + i);
+      stream = await navigator.mediaDevices.getUserMedia(constraints[i]);
+      dlog('requestCamera: got stream with constraint ' + i);
+      break;
+    } catch(e) {
+      dlog('requestCamera: constraint ' + i + ' failed: ' + e.name + ' - ' + e.message);
+      lastErr = e;
+    }
+  }
+
+  if (!stream) {
+    throw new Error('カメラ取得失敗: ' + (lastErr && lastErr.message || 'unknown'));
+  }
+
+  var video = document.getElementById('cameraVideo');
+  video.srcObject = stream;
+  dlog('requestCamera: video.srcObject set, calling play()');
+
+  try {
     await video.play();
-  } catch(err) {
-    throw new Error('カメラへのアクセスが拒否されました');
+    dlog('requestCamera: video.play() OK');
+  } catch(e) {
+    dlog('requestCamera: video.play() failed: ' + e.message + ' (continuing anyway)');
   }
 }
 
 function startTracking() {
   isRunning = true;
   document.getElementById('locLabel').textContent = observerLabel;
-  buildCompassBar();
-  updateTleFooter();
-  render();
+
+  try { buildCompassBar(); } catch(e) { dlog('startTracking: buildCompassBar error: ' + e.message); }
+  try { updateTleFooter(); } catch(e) { dlog('startTracking: updateTleFooter error: ' + e.message); }
+  try { render(); } catch(e) { dlog('startTracking: render error: ' + e.message); }
+
   setInterval(render, 200);
   setInterval(updateTleFooter, 60000);
   requestAnimationFrame(updateOrientationDisplay);
@@ -969,6 +1052,11 @@ function computeSatPosition(sat, date) {
 
 function render() {
   if (!isRunning || !observer) return;
+
+  if (Object.keys(tleDatabase).length === 0) {
+    dlog('render: no TLEs loaded, loading fallback');
+    loadFallbackTLEs();
+  }
 
   var now = new Date();
   document.getElementById('timeDisplay').textContent = now.toLocaleTimeString('ja-JP');
