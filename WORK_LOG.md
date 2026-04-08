@@ -3,90 +3,100 @@
 ## 作業概要
 
 HANDOFF.md に基づき、iPhone Safari での「START TRACKING」後にメイン画面に進まない問題を修正。
-デバッグオーバーレイの追加 + 考えられる原因を網羅的に修正。
+その後、UX改善を複数回実施。
 
-## 作業内容
+---
+
+## セッション1: iPhone起動問題の修正
 
 ### フェーズ1: 状況把握
 - gitリポジトリは `sat-ar/` サブディレクトリ内にあることを確認
 - `index.html` 1ファイル構成、satellite.js CDNのみ依存
-- 既存コードにはデバッグログのdivがあったが `display:none` で不可視、`dlog()` 関数が未定義
 
-### フェーズ2: デバッグオーバーレイ追加
-- `debugLog` divの `display:none` を削除（デフォルト表示に変更）
-- `dlog()` 関数を追加（画面表示 + console.log 両方に出力）
-- グローバルエラーハンドラ（`error`, `unhandledrejection`）を追加
-- ブート時にiOS判定とUA情報を表示
-- startBtn, requestGeolocation, requestOrientation, requestCamera の各所に詳細ログ追加
+### フェーズ2: デバッグオーバーレイ追加 (`fcee250`)
+- `dlog()` 関数 + グローバルエラーハンドラ追加
+- 起動フロー全体に詳細ログ追加
 
-### フェーズ3: iPhone起動問題の先回り修正（修正1〜6）
+### フェーズ3: iPhone先回り修正 (`fcee250`)
+- getUserMedia 4段階フォールバック
+- geolocation タイムアウト短縮 (8s→5s)
+- startTracking 内の例外保護
+- TLE未ロード時の自動フォールバック
 
-**修正1: getUserMedia のフォールバック**
-- 4段階の constraint を順次試行:
-  1. `{ exact: 'environment' }`
-  2. `{ facingMode: 'environment' }`
-  3. `{ ideal: 'environment' }`
-  4. `{ video: true }` (最終手段)
+### フェーズ4: orientation権限エラー修正 (`d28e759`)
+**根本原因**: iOS Safari の transient activation (ユーザージェスチャー権限) は約1秒でタイムアウト。
+`await requestGeolocation()` の後に `requestPermission()` を呼んでいたためジェスチャー権限切れ。
 
-**修正2: geolocation タイムアウト短縮**
-- `timeout: 8000` → `5000`
-- `enableHighAccuracy: true` → `false` (高精度は遅くなるため)
-
-**修正3: requestOrientation の5秒タイムアウト**
-- 権限ダイアログが応答しない場合、5秒後に自動続行
-- 詳細な状態ログを追加
-
-**修正4: startTracking 内の例外保護**
-- `buildCompassBar()`, `updateTleFooter()`, `render()` を個別に try-catch
-
-**修正5: TLE未ロード時の自動フォールバック**
-- `render()` で `tleDatabase` が空なら `loadFallbackTLEs()` を呼ぶ
-
-**修正6: start-btn の z-index**
-- 元コードで既に `position: relative; z-index: 10;` が設定されていたので変更不要
-
-### フェーズ4: コミット & プッシュ
-- コミット: `fcee250`
-- main ブランチにプッシュ済み
+**修正**: クリックハンドラを同期関数に変更し、`requestPermission()` を即座に呼び出す。
 
 ---
 
-## 追加修正 (ユーザーフィードバック後)
+## セッション2: デバッグオーバーレイの制御 (`67891a6`)
 
-### iPhoneスクショからの診断
+アプリは正常に動作確認できたが、デバッグログが画面の上半分を覆っていた。
+- デフォルト非表示に変更
+- `?debug=1` パラメータで表示切替
 
-**エラーメッセージ**: `Requesting device orientation access requires a user gesture to prompt`
+---
 
-### 根本原因の調査
+## セッション3: UX改善 — 次パス予測 + ソート (`bc46013`)
 
-WebKitのドキュメントとソースから確認:
-- iOS Safari は `DeviceOrientationEvent.requestPermission()` に **transient activation**（一時的ユーザージェスチャー権限）を要求
-- WebKit の transient activation タイムアウトは **約1秒**
-- 元のコードは `async function` クリックハンドラ内で `await requestGeolocation()`（最大5秒）を先に実行
-- → geolocation 完了時にはジェスチャー権限が期限切れ → requestPermission() が失敗
+### 追加機能
+- **次パス予測**: 地平線以下の衛星に次のパス時刻・最大仰角・昇る方位を表示（60秒毎に計算）
+- **方位名**: "AZ 201°" → "AZ 201° SSW" と方位名を併記
+- **衛星リストソート**: 可視衛星(仰角高い順) → 次パスが近い順
+- **エッジインジケータ**: 可視衛星がカメラ外の場合、画面端に方向矢印
 
-### 修正内容 (コミット `d28e759`)
+---
 
-クリックハンドラを同期関数に変更し、`requestPermission()` を**即座に同期的に呼び出す**:
+## セッション4: ブラウザキャッシュ対策 (`0b7065f`)
 
-```
-click handler (sync function)
-  → DeviceOrientationEvent.requestPermission()  // 即座に呼ぶ
-  → .then() → continueStartup() (async)
-    → await requestGeolocation()
-    → await requestCamera()
-    → startTracking()
-```
+iPhoneで新しい版が表示されない問題に対し、Cache-Control メタタグ追加。
 
-### 検証
+---
 
-1. JS構文チェック: Node.js の `new Function()` でパース確認 → PASS
-2. click handler が非async であること → PASS
-3. `requestPermission()` が最初の `await` より前に呼ばれること → PASS
-4. geolocation / camera が正しく await されること → PASS
+## セッション5: UIリデザイン — 折りたたみドロワー (`526a795`)
 
-### 確認方法
-Safari完全終了→再読み込み→START TRACKING タップ→デバッグログで以下を確認:
-- `calling DeviceOrientationEvent.requestPermission() SYNC in gesture` が表示される
-- `orientation permission result = granted` が表示される
-- その後 geolocation → camera の順で進む
+### ユーザーフィードバック
+「衛星リストが画面の半分を占めてカメラ映像が見えない」
+「次にどの衛星がどっちから来るかが一目で分からない」
+
+### 変更内容
+1. **Next-up バー** (常時表示、1行)
+   - 「NEXT: ISS 42min NE · max EL 45°」のように次の衛星を表示
+   - 可視衛星がある場合は「ISS VISIBLE · NE EL 12°」
+   - 2番目の衛星も「THEN:」で表示
+
+2. **折りたたみ式ドロワー**
+   - 「LIST」ボタンで全衛星リスト展開
+   - 「CLOSE」で閉じる
+   - カメラ映像を邪魔しない
+
+3. **衛星選択トグル**
+   - 各衛星にチェックボックス
+   - 選択した衛星だけARで追跡
+   - デフォルト: 可視衛星 + 次に来る2機を自動選択
+
+4. **地平線以下のAR表示**
+   - 追跡対象の地平線以下衛星は、画面端に昇る方向 + カウントダウンを表示
+
+---
+
+## コミット履歴
+
+| コミット | 内容 |
+|---------|------|
+| `fcee250` | デバッグオーバーレイ + iPhone先回り修正6件 |
+| `495a77a` | WORK_LOG.md 作成 |
+| `0a37107` | orientation権限を最初に要求するよう順番変更 |
+| `d28e759` | requestPermission() を同期的にクリックハンドラ内で呼ぶ |
+| `4e8de2f` | WORK_LOG更新 |
+| `67891a6` | デバッグオーバーレイをデフォルト非表示に |
+| `bc46013` | 次パス予測 + ソート + 方位名 + エッジインジケータ |
+| `0b7065f` | Cache-Control メタタグ追加 |
+| `526a795` | UIリデザイン: 折りたたみドロワー + Next-upバー |
+
+## 現在の状態
+- 全コミットがmainにプッシュ済み
+- GitHub Pagesビルド完了 (コミット `526a795`)
+- iPhoneで確認する場合はSafariのキャッシュをクリアしてからアクセスが必要
