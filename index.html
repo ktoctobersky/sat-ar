@@ -550,13 +550,18 @@
 <div id="debugLog" style="position:fixed;top:0;left:0;right:0;max-height:50vh;
      overflow-y:auto;background:rgba(0,0,0,0.92);color:#0f0;font:11px monospace;
      padding:8px;z-index:99999;white-space:pre-wrap;word-break:break-all;
-     border-bottom:1px solid #0f0;pointer-events:auto;"></div>
+     border-bottom:1px solid #0f0;pointer-events:auto;display:none;"></div>
 
 <script>
+var debugMode = location.search.indexOf('debug=1') !== -1;
+if (debugMode) {
+  document.getElementById('debugLog').style.display = 'block';
+}
+
 function dlog(msg) {
   var el = document.getElementById('debugLog');
   var line = new Date().toISOString().substr(11,12) + ' ' + msg;
-  if (el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; }
+  if (debugMode && el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; }
   console.log(line);
 }
 
