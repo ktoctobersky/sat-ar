@@ -423,58 +423,141 @@
   .sat-marker.linear { color: var(--linear); }
   .sat-marker.digi { color: var(--digi); }
 
-  .hud-bottom {
+  /* ---- Next-up banner (常時表示、コンパクト) ---- */
+  .next-up-bar {
     position: absolute;
     bottom: env(safe-area-inset-bottom, 0);
     left: 0;
     right: 0;
-    padding: 16px 16px calc(env(safe-area-inset-bottom, 0) + 16px);
-    background: linear-gradient(to top, rgba(5,8,18,0.92), rgba(5,8,18,0.6) 70%, transparent);
+    padding: 10px 16px calc(env(safe-area-inset-bottom, 0) + 10px);
+    background: linear-gradient(to top, rgba(5,8,18,0.95), rgba(5,8,18,0.7) 80%, transparent);
     z-index: 10;
-    max-height: 50vh;
+    pointer-events: auto;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .next-up-bar .next-up-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .next-up-bar .next-sat-info {
+    flex: 1;
+    font-size: 11px;
+    color: var(--ink);
+  }
+  .next-up-bar .next-sat-info .sat-name {
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .next-up-bar .next-sat-info .sat-detail {
+    font-size: 9px;
+    color: var(--ink-dim);
+    margin-top: 2px;
+  }
+  .next-up-bar .next-sat-info .countdown {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .next-up-bar .time-display {
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 0.05em;
+  }
+  .menu-toggle-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 6px 10px;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    cursor: pointer;
+    margin-left: 12px;
+    flex-shrink: 0;
+  }
+  .menu-toggle-btn:active { background: rgba(244, 197, 107, 0.15); }
+
+  /* ---- Full satellite drawer ---- */
+  .sat-drawer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-height: 70vh;
+    background: rgba(5,8,18,0.96);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    z-index: 20;
+    transform: translateY(100%);
+    transition: transform 0.3s ease;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     pointer-events: auto;
+    padding: 0 16px calc(env(safe-area-inset-bottom, 0) + 16px);
+    border-top: 1px solid var(--grid);
   }
-
-  .bottom-title {
+  .sat-drawer.open { transform: translateY(0); }
+  .sat-drawer-header {
+    position: sticky;
+    top: 0;
+    background: rgba(5,8,18,0.98);
+    padding: 14px 0 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--grid);
+    z-index: 1;
     font-family: 'JetBrains Mono', monospace;
+  }
+  .sat-drawer-header .title {
     font-size: 9px;
     letter-spacing: 0.3em;
     color: var(--accent);
     text-transform: uppercase;
-    margin-bottom: 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
   }
-
-  .tle-refresh-btn {
+  .drawer-close-btn {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    padding: 4px 8px;
+    font-size: 10px;
+    padding: 4px 10px;
     background: transparent;
     color: var(--ink-dim);
     border: 1px solid var(--grid);
     cursor: pointer;
-    margin-left: 8px;
   }
-  .tle-refresh-btn:active { background: rgba(244, 197, 107, 0.1); color: var(--accent); }
 
   .sat-compact {
     display: grid;
-    grid-template-columns: 14px 1fr auto;
-    gap: 10px;
-    padding: 8px 0;
+    grid-template-columns: 26px 14px 1fr auto;
+    gap: 8px;
+    padding: 10px 0;
     border-bottom: 1px solid var(--grid);
     align-items: center;
     font-family: 'JetBrains Mono', monospace;
   }
-
   .sat-compact:last-child { border-bottom: none; }
-  .sat-compact.below { opacity: 0.35; }
+  .sat-compact.below { opacity: 0.5; }
+  .sat-compact.tracked { opacity: 1; }
+
+  .sat-toggle {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: 1.5px solid var(--grid);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: transparent;
+    padding: 0;
+  }
+  .sat-toggle.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(244, 197, 107, 0.1);
+  }
 
   .sat-compact .dot {
     width: 8px;
@@ -506,6 +589,12 @@
     margin-top: 1px;
   }
   .sat-compact.below .pos .status { color: var(--ink-dim); }
+  .sat-compact .pos .next-pass {
+    font-size: 8px;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    margin-top: 1px;
+  }
 
   .tle-footer {
     margin-top: 12px;
@@ -519,6 +608,21 @@
   }
   .tle-footer.stale { color: var(--iss); }
 
+  .tle-refresh-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    background: transparent;
+    color: var(--ink-dim);
+    border: 1px solid var(--grid);
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .tle-refresh-btn:active { background: rgba(244, 197, 107, 0.1); color: var(--accent); }
+
+  /* ---- Edge indicator for tracked sats ---- */
   .sat-edge-indicator {
     position: absolute;
     z-index: 7;
@@ -527,29 +631,25 @@
     font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.05em;
-    padding: 4px 8px;
-    border-radius: 2px;
+    padding: 6px 10px;
+    border-radius: 3px;
     background: var(--glass);
     backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
     white-space: nowrap;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
+    border: 1px solid;
   }
   .sat-edge-indicator .arrow {
     font-size: 14px;
     line-height: 1;
   }
-
-  .sat-compact .next-pass {
+  .sat-edge-indicator .edge-detail {
     font-size: 8px;
-    color: var(--accent);
-    letter-spacing: 0.05em;
+    opacity: 0.7;
     margin-top: 1px;
-  }
-  .sat-compact.below .next-pass {
-    color: var(--ink-dim);
   }
 
   .error-toast {
@@ -660,10 +760,18 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
 
     <div id="markerLayer"></div>
 
-    <div class="hud-bottom">
-      <div class="bottom-title">
-        <span>Satellites &middot; Live</span>
-        <span id="timeDisplay">--:--:--</span>
+    <div class="next-up-bar" id="nextUpBar">
+      <div class="next-up-content">
+        <div class="next-sat-info" id="nextUpInfo">--</div>
+        <span class="time-display" id="timeDisplay">--:--:--</span>
+        <button class="menu-toggle-btn" id="menuToggleBtn">LIST</button>
+      </div>
+    </div>
+
+    <div class="sat-drawer" id="satDrawer">
+      <div class="sat-drawer-header">
+        <span class="title">All Satellites</span>
+        <button class="drawer-close-btn" id="drawerCloseBtn">CLOSE</button>
       </div>
       <div id="satListCompact"></div>
       <div class="tle-footer" id="tleFooter">
@@ -874,6 +982,9 @@ var deviceRoll = 0;
 var cameraFOV = 65;
 var isRunning = false;
 var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
+var trackedSats = {}; // { noradId: true/false } user-selected tracking
+var drawerOpen = false;
+var autoTrackedIds = []; // auto-selected: next 2 upcoming sats
 
 // ============================================================
 // スタート
@@ -1159,6 +1270,20 @@ function formatTimeUntil(futureDate) {
   return h + 'h' + (m > 0 ? m + 'm' : '');
 }
 
+function isSatTracked(norad) {
+  // ユーザが明示的にON/OFFした場合はそれに従う
+  if (trackedSats.hasOwnProperty(norad)) return trackedSats[norad];
+  // デフォルト: 可視衛星 + 自動選択された次の2機
+  return autoTrackedIds.indexOf(norad) !== -1;
+}
+
+function getSatColor(type) {
+  return type === 'iss' ? 'var(--iss)'
+       : type === 'fm' ? 'var(--fm-sat)'
+       : type === 'linear' ? 'var(--linear)'
+       : 'var(--digi)';
+}
+
 function render() {
   if (!isRunning || !observer) return;
 
@@ -1171,11 +1296,9 @@ function render() {
   document.getElementById('timeDisplay').textContent = now.toLocaleTimeString('ja-JP');
 
   var markerLayer = document.getElementById('markerLayer');
-  var listBody = document.getElementById('satListCompact');
   markerLayer.innerHTML = '';
-  listBody.innerHTML = '';
 
-  // 全衛星の位置を計算してソート用データを作成
+  // 全衛星の位置を計算してソート
   var satData = [];
   TRACKED_SATS.forEach(function(sat) {
     var pos = computeSatPosition(sat, now);
@@ -1184,60 +1307,124 @@ function render() {
     satData.push({ sat: sat, pos: pos, pass: pass });
   });
 
-  // ソート: 可視衛星(仰角高い順) → 地平線以下(次パスが近い順)
   satData.sort(function(a, b) {
     var aVis = a.pos.elevation > 0;
     var bVis = b.pos.elevation > 0;
     if (aVis && !bVis) return -1;
     if (!aVis && bVis) return 1;
     if (aVis && bVis) return b.pos.elevation - a.pos.elevation;
-    // 両方地平線以下: 次パスが近い順
     var aTime = (a.pass && a.pass.riseTime) ? a.pass.riseTime.getTime() : Infinity;
     var bTime = (b.pass && b.pass.riseTime) ? b.pass.riseTime.getTime() : Infinity;
     return aTime - bTime;
   });
 
+  // 自動追跡: 可視衛星 + 次に来る2機
+  var newAutoTracked = [];
+  var belowCount = 0;
+  satData.forEach(function(item) {
+    if (item.pos.elevation > 0) {
+      newAutoTracked.push(item.sat.norad);
+    } else if (belowCount < 2 && item.pass && item.pass.riseTime) {
+      newAutoTracked.push(item.sat.norad);
+      belowCount++;
+    }
+  });
+  autoTrackedIds = newAutoTracked;
+
+  // ---- next-up バー更新 ----
+  var nextUpInfo = document.getElementById('nextUpInfo');
+  var visibleSats = satData.filter(function(d) { return d.pos.elevation > 0; });
+  var upcomingSats = satData.filter(function(d) {
+    return d.pos.elevation <= 0 && d.pass && d.pass.riseTime;
+  });
+
+  if (visibleSats.length > 0) {
+    var vs = visibleSats[0];
+    var vsDir = headingToCardinal(vs.pos.azimuth);
+    nextUpInfo.innerHTML =
+      '<span class="sat-name" style="color:' + getSatColor(vs.sat.type) + '">' + vs.sat.displayName + '</span> ' +
+      '<span class="countdown">VISIBLE</span> · ' + vsDir + ' EL ' + vs.pos.elevation.toFixed(0) + '°' +
+      (visibleSats.length > 1 ? ' <span style="color:var(--ink-dim)">+' + (visibleSats.length - 1) + '</span>' : '') +
+      (upcomingSats.length > 0 ?
+        '<div class="sat-detail">NEXT: ' + upcomingSats[0].sat.displayName + ' in ' + formatTimeUntil(upcomingSats[0].pass.riseTime) + ' ' + headingToCardinal(upcomingSats[0].pass.azAtRise) + '</div>' : '');
+  } else if (upcomingSats.length > 0) {
+    var ns = upcomingSats[0];
+    var riseDir = headingToCardinal(ns.pass.azAtRise);
+    nextUpInfo.innerHTML =
+      'NEXT: <span class="sat-name" style="color:' + getSatColor(ns.sat.type) + '">' + ns.sat.displayName + '</span> ' +
+      '<span class="countdown">' + formatTimeUntil(ns.pass.riseTime) + '</span> · ' +
+      riseDir + ' · max EL ' + ns.pass.maxEl + '°' +
+      (upcomingSats.length > 1 ?
+        '<div class="sat-detail">THEN: ' + upcomingSats[1].sat.displayName + ' in ' + formatTimeUntil(upcomingSats[1].pass.riseTime) + ' ' + headingToCardinal(upcomingSats[1].pass.azAtRise) + '</div>' : '');
+  } else {
+    nextUpInfo.textContent = 'No upcoming passes';
+  }
+
+  // ---- ドロワーリスト更新（開いている時だけ） ----
+  if (drawerOpen) {
+    var listBody = document.getElementById('satListCompact');
+    listBody.innerHTML = '';
+
+    satData.forEach(function(item) {
+      var sat = item.sat;
+      var pos = item.pos;
+      var pass = item.pass;
+      var visible = pos.elevation > 0;
+      var dotColor = getSatColor(sat.type);
+      var cardinal = headingToCardinal(pos.azimuth);
+      var tracked = isSatTracked(sat.norad);
+
+      var statusHtml;
+      if (visible) {
+        statusHtml = '<div class="status">VISIBLE</div>';
+      } else if (pass && pass.riseTime) {
+        var riseCardinal = headingToCardinal(pass.azAtRise);
+        statusHtml = '<div class="next-pass">' +
+          formatTimeUntil(pass.riseTime) + ' · max EL ' + pass.maxEl + '° · ' + riseCardinal +
+          '</div>';
+      } else {
+        statusHtml = '<div class="status">BELOW HORIZON</div>';
+      }
+
+      var row = document.createElement('div');
+      row.className = 'sat-compact' + (visible ? '' : ' below') + (tracked ? ' tracked' : '');
+      row.innerHTML =
+        '<button class="sat-toggle' + (tracked ? ' active' : '') + '" data-norad="' + sat.norad + '">\u2713</button>' +
+        '<div class="dot" style="background: ' + dotColor + '"></div>' +
+        '<div class="info">' +
+          '<div class="name">' + sat.displayName + '</div>' +
+          '<div class="freq">' + sat.freq + '</div>' +
+        '</div>' +
+        '<div class="pos">' +
+          'AZ ' + pos.azimuth.toFixed(0) + '° ' + cardinal + ' · EL ' + pos.elevation.toFixed(0) + '°' +
+          statusHtml +
+        '</div>';
+      listBody.appendChild(row);
+
+      // トグルボタンイベント
+      row.querySelector('.sat-toggle').addEventListener('click', function() {
+        var norad = parseInt(this.getAttribute('data-norad'), 10);
+        var currentlyTracked = isSatTracked(norad);
+        trackedSats[norad] = !currentlyTracked;
+        this.classList.toggle('active');
+      });
+    });
+  }
+
+  // ---- AR マーカー + エッジインジケータ ----
   satData.forEach(function(item) {
     var sat = item.sat;
     var pos = item.pos;
     var pass = item.pass;
     var visible = pos.elevation > 0;
-    var dotColor = sat.type === 'iss' ? 'var(--iss)'
-                 : sat.type === 'fm' ? 'var(--fm-sat)'
-                 : sat.type === 'linear' ? 'var(--linear)'
-                 : 'var(--digi)';
-    var cardinal = headingToCardinal(pos.azimuth);
-
-    // ステータス行の構築
-    var statusHtml;
-    if (visible) {
-      statusHtml = '<div class="status">VISIBLE</div>';
-    } else if (pass && pass.riseTime) {
-      var riseCardinal = headingToCardinal(pass.azAtRise);
-      statusHtml = '<div class="next-pass">' +
-        formatTimeUntil(pass.riseTime) + ' · max EL ' + pass.maxEl + '° · ' + riseCardinal +
-        '</div>';
-    } else {
-      statusHtml = '<div class="status">BELOW HORIZON</div>';
-    }
-
-    var row = document.createElement('div');
-    row.className = 'sat-compact' + (visible ? '' : ' below');
-    row.innerHTML =
-      '<div class="dot" style="background: ' + dotColor + '"></div>' +
-      '<div class="info">' +
-        '<div class="name">' + sat.displayName + '</div>' +
-        '<div class="freq">' + sat.freq + '</div>' +
-      '</div>' +
-      '<div class="pos">' +
-        'AZ ' + pos.azimuth.toFixed(0) + '° ' + cardinal + ' · EL ' + pos.elevation.toFixed(0) + '°' +
-        statusHtml +
-      '</div>';
-    listBody.appendChild(row);
+    var tracked = isSatTracked(sat.norad);
 
     if (visible) {
       var inFov = placeSatMarker(sat, pos);
-      if (!inFov) placeEdgeIndicator(sat, pos);
+      if (!inFov) placeEdgeIndicator(sat, pos, null);
+    } else if (tracked && pass && pass.riseTime) {
+      // 地平線以下だが追跡対象: 昇る方位を示すエッジインジケータ
+      placeEdgeIndicator(sat, { azimuth: pass.azAtRise, elevation: 0 }, pass);
     }
   });
 }
@@ -1274,43 +1461,50 @@ function placeSatMarker(sat, pos) {
   return true;
 }
 
-function placeEdgeIndicator(sat, pos) {
+function placeEdgeIndicator(sat, pos, pass) {
   var azDiff = pos.azimuth - deviceHeading;
   while (azDiff > 180) azDiff -= 360;
   while (azDiff < -180) azDiff += 360;
 
   var screenW = window.innerWidth;
   var screenH = window.innerHeight;
-  var margin = 12;
-  var dotColor = sat.type === 'iss' ? 'var(--iss)'
-               : sat.type === 'fm' ? 'var(--fm-sat)'
-               : sat.type === 'linear' ? 'var(--linear)'
-               : 'var(--digi)';
+  var margin = 8;
+  var dotColor = getSatColor(sat.type);
 
-  // 矢印と位置を決定
-  var arrow, x, y;
-  if (azDiff < 0) {
-    // 左側
+  var arrow;
+  if (Math.abs(azDiff) < 15) {
+    arrow = '\u25B2'; // ▲ (ほぼ正面)
+  } else if (azDiff < 0) {
     arrow = '\u25C0'; // ◀
-    x = margin;
-    y = Math.max(120, Math.min(screenH * 0.5, screenH / 2 - pos.elevation * 3));
   } else {
-    // 右側
     arrow = '\u25B6'; // ▶
-    x = screenW - margin;
-    y = Math.max(120, Math.min(screenH * 0.5, screenH / 2 - pos.elevation * 3));
+  }
+
+  var yBase = screenH * 0.4;
+  if (pos.elevation > 0) {
+    yBase = Math.max(120, screenH / 2 - pos.elevation * 3);
+  }
+
+  var detailText = '';
+  if (pass && pass.riseTime) {
+    detailText = '<div class="edge-detail">' + formatTimeUntil(pass.riseTime) + ' · max ' + pass.maxEl + '°</div>';
+  } else if (pos.elevation > 0) {
+    detailText = '<div class="edge-detail">EL ' + pos.elevation.toFixed(0) + '°</div>';
   }
 
   var indicator = document.createElement('div');
   indicator.className = 'sat-edge-indicator';
   indicator.style.color = dotColor;
-  indicator.style.top = y + 'px';
+  indicator.style.borderColor = dotColor;
+  indicator.style.top = yBase + 'px';
+
   if (azDiff < 0) {
-    indicator.style.left = x + 'px';
+    indicator.style.left = margin + 'px';
   } else {
     indicator.style.right = margin + 'px';
   }
-  indicator.innerHTML = '<span class="arrow">' + arrow + '</span> ' + sat.displayName + ' EL' + pos.elevation.toFixed(0) + '\u00B0';
+
+  indicator.innerHTML = '<span class="arrow">' + arrow + '</span><div>' + sat.displayName + detailText + '</div>';
   document.getElementById('markerLayer').appendChild(indicator);
 }
 
@@ -1371,6 +1565,16 @@ function updateTleFooter() {
 
   footer.classList.toggle('stale', ageDays >= 3);
 }
+
+// ドロワー開閉
+document.getElementById('menuToggleBtn').addEventListener('click', function() {
+  drawerOpen = true;
+  document.getElementById('satDrawer').classList.add('open');
+});
+document.getElementById('drawerCloseBtn').addEventListener('click', function() {
+  drawerOpen = false;
+  document.getElementById('satDrawer').classList.remove('open');
+});
 
 document.getElementById('tleRefreshBtn').addEventListener('click', async function() {
   var btn = document.getElementById('tleRefreshBtn');
