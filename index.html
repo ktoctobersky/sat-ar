@@ -516,6 +516,39 @@
   }
   .tle-footer.stale { color: var(--iss); }
 
+  .sat-edge-indicator {
+    position: absolute;
+    z-index: 7;
+    pointer-events: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    padding: 4px 8px;
+    border-radius: 2px;
+    background: var(--glass);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sat-edge-indicator .arrow {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .sat-compact .next-pass {
+    font-size: 8px;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    margin-top: 1px;
+  }
+  .sat-compact.below .next-pass {
+    color: var(--ink-dim);
+  }
+
   .error-toast {
     position: absolute;
     top: 50%;
@@ -837,6 +870,7 @@ var devicePitch = 0;
 var deviceRoll = 0;
 var cameraFOV = 65;
 var isRunning = false;
+var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
 
 // ============================================================
 // スタート
@@ -1013,8 +1047,11 @@ function startTracking() {
   try { updateTleFooter(); } catch(e) { dlog('startTracking: updateTleFooter error: ' + e.message); }
   try { render(); } catch(e) { dlog('startTracking: render error: ' + e.message); }
 
+  try { computeNextPasses(); } catch(e) { dlog('startTracking: computeNextPasses error: ' + e.message); }
+
   setInterval(render, 200);
   setInterval(updateTleFooter, 60000);
+  setInterval(computeNextPasses, 60000);
   requestAnimationFrame(updateOrientationDisplay);
 }
 
@@ -1039,6 +1076,86 @@ function computeSatPosition(sat, date) {
   } catch(e) { return null; }
 }
 
+// ============================================================
+// 次のパス予測（60秒ごとに計算）
+// ============================================================
+function computeNextPasses() {
+  if (!observer) return;
+  var now = new Date();
+  var maxLookAhead = 24 * 60 * 60 * 1000; // 24時間先まで
+  var stepMs = 60 * 1000; // 1分刻み
+
+  TRACKED_SATS.forEach(function(sat) {
+    var tleData = tleDatabase[sat.norad];
+    if (!tleData) return;
+
+    try {
+      var satrec = satellite.twoline2satrec(tleData.tle1, tleData.tle2);
+      var currentPos = computeSatPosition(sat, now);
+
+      // 現在可視なら次パスは不要（現在のパス情報を記録）
+      if (currentPos && currentPos.elevation > 0) {
+        nextPassCache[sat.norad] = { riseTime: null, maxEl: currentPos.elevation, isNow: true, azAtRise: currentPos.azimuth };
+        return;
+      }
+
+      // 未来方向にスキャンして次の仰角>0の時刻を探す
+      var riseTime = null;
+      var maxEl = 0;
+      var azAtRise = 0;
+      var wasAbove = false;
+      var foundPass = false;
+
+      for (var dt = stepMs; dt <= maxLookAhead; dt += stepMs) {
+        var futureDate = new Date(now.getTime() + dt);
+        var pv = satellite.propagate(satrec, futureDate);
+        if (!pv.position) continue;
+
+        var gmst = satellite.gstime(futureDate);
+        var ecf = satellite.eciToEcf(pv.position, gmst);
+        var look = satellite.ecfToLookAngles(observer, ecf);
+        var el = satellite.radiansToDegrees(look.elevation);
+        var az = satellite.radiansToDegrees(look.azimuth);
+
+        if (el > 0 && !riseTime) {
+          riseTime = futureDate;
+          azAtRise = az;
+        }
+        if (riseTime && el > maxEl) {
+          maxEl = el;
+        }
+        if (riseTime && el <= 0) {
+          foundPass = true;
+          break; // パス完了
+        }
+      }
+
+      if (riseTime) {
+        nextPassCache[sat.norad] = {
+          riseTime: riseTime,
+          maxEl: Math.round(maxEl),
+          azAtRise: Math.round(azAtRise),
+          isNow: false
+        };
+      } else {
+        nextPassCache[sat.norad] = null;
+      }
+    } catch(e) {
+      // 計算エラーは無視
+    }
+  });
+}
+
+function formatTimeUntil(futureDate) {
+  var diffMs = futureDate.getTime() - Date.now();
+  if (diffMs < 0) return 'now';
+  var diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 60) return diffMin + 'min';
+  var h = Math.floor(diffMin / 60);
+  var m = diffMin % 60;
+  return h + 'h' + (m > 0 ? m + 'm' : '');
+}
+
 function render() {
   if (!isRunning || !observer) return;
 
@@ -1055,15 +1172,51 @@ function render() {
   markerLayer.innerHTML = '';
   listBody.innerHTML = '';
 
+  // 全衛星の位置を計算してソート用データを作成
+  var satData = [];
   TRACKED_SATS.forEach(function(sat) {
     var pos = computeSatPosition(sat, now);
     if (!pos) return;
+    var pass = nextPassCache[sat.norad] || null;
+    satData.push({ sat: sat, pos: pos, pass: pass });
+  });
 
+  // ソート: 可視衛星(仰角高い順) → 地平線以下(次パスが近い順)
+  satData.sort(function(a, b) {
+    var aVis = a.pos.elevation > 0;
+    var bVis = b.pos.elevation > 0;
+    if (aVis && !bVis) return -1;
+    if (!aVis && bVis) return 1;
+    if (aVis && bVis) return b.pos.elevation - a.pos.elevation;
+    // 両方地平線以下: 次パスが近い順
+    var aTime = (a.pass && a.pass.riseTime) ? a.pass.riseTime.getTime() : Infinity;
+    var bTime = (b.pass && b.pass.riseTime) ? b.pass.riseTime.getTime() : Infinity;
+    return aTime - bTime;
+  });
+
+  satData.forEach(function(item) {
+    var sat = item.sat;
+    var pos = item.pos;
+    var pass = item.pass;
     var visible = pos.elevation > 0;
     var dotColor = sat.type === 'iss' ? 'var(--iss)'
                  : sat.type === 'fm' ? 'var(--fm-sat)'
                  : sat.type === 'linear' ? 'var(--linear)'
                  : 'var(--digi)';
+    var cardinal = headingToCardinal(pos.azimuth);
+
+    // ステータス行の構築
+    var statusHtml;
+    if (visible) {
+      statusHtml = '<div class="status">VISIBLE</div>';
+    } else if (pass && pass.riseTime) {
+      var riseCardinal = headingToCardinal(pass.azAtRise);
+      statusHtml = '<div class="next-pass">' +
+        formatTimeUntil(pass.riseTime) + ' · max EL ' + pass.maxEl + '° · ' + riseCardinal +
+        '</div>';
+    } else {
+      statusHtml = '<div class="status">BELOW HORIZON</div>';
+    }
 
     var row = document.createElement('div');
     row.className = 'sat-compact' + (visible ? '' : ' below');
@@ -1074,12 +1227,15 @@ function render() {
         '<div class="freq">' + sat.freq + '</div>' +
       '</div>' +
       '<div class="pos">' +
-        'AZ ' + pos.azimuth.toFixed(0) + '&deg; &middot; EL ' + pos.elevation.toFixed(0) + '&deg;' +
-        '<div class="status">' + (visible ? 'VISIBLE' : 'BELOW HORIZON') + '</div>' +
+        'AZ ' + pos.azimuth.toFixed(0) + '° ' + cardinal + ' · EL ' + pos.elevation.toFixed(0) + '°' +
+        statusHtml +
       '</div>';
     listBody.appendChild(row);
 
-    if (visible) placeSatMarker(sat, pos);
+    if (visible) {
+      var inFov = placeSatMarker(sat, pos);
+      if (!inFov) placeEdgeIndicator(sat, pos);
+    }
   });
 }
 
@@ -1096,7 +1252,7 @@ function placeSatMarker(sat, pos) {
   var halfFovH = cameraFOV / 2;
   var halfFovV = (cameraFOV * screenH / screenW) / 2;
 
-  if (Math.abs(azDiff) > halfFovH + 10 || Math.abs(elDiff) > halfFovV + 10) return;
+  if (Math.abs(azDiff) > halfFovH + 10 || Math.abs(elDiff) > halfFovV + 10) return false;
 
   var x = screenW / 2 + (azDiff / halfFovH) * (screenW / 2);
   var y = screenH / 2 - (elDiff / halfFovV) * (screenH / 2);
@@ -1112,6 +1268,47 @@ function placeSatMarker(sat, pos) {
       '<span class="meta">' + sat.freq + ' &middot; EL ' + pos.elevation.toFixed(0) + '&deg;</span>' +
     '</div>';
   document.getElementById('markerLayer').appendChild(marker);
+  return true;
+}
+
+function placeEdgeIndicator(sat, pos) {
+  var azDiff = pos.azimuth - deviceHeading;
+  while (azDiff > 180) azDiff -= 360;
+  while (azDiff < -180) azDiff += 360;
+
+  var screenW = window.innerWidth;
+  var screenH = window.innerHeight;
+  var margin = 12;
+  var dotColor = sat.type === 'iss' ? 'var(--iss)'
+               : sat.type === 'fm' ? 'var(--fm-sat)'
+               : sat.type === 'linear' ? 'var(--linear)'
+               : 'var(--digi)';
+
+  // 矢印と位置を決定
+  var arrow, x, y;
+  if (azDiff < 0) {
+    // 左側
+    arrow = '\u25C0'; // ◀
+    x = margin;
+    y = Math.max(120, Math.min(screenH * 0.5, screenH / 2 - pos.elevation * 3));
+  } else {
+    // 右側
+    arrow = '\u25B6'; // ▶
+    x = screenW - margin;
+    y = Math.max(120, Math.min(screenH * 0.5, screenH / 2 - pos.elevation * 3));
+  }
+
+  var indicator = document.createElement('div');
+  indicator.className = 'sat-edge-indicator';
+  indicator.style.color = dotColor;
+  indicator.style.top = y + 'px';
+  if (azDiff < 0) {
+    indicator.style.left = x + 'px';
+  } else {
+    indicator.style.right = margin + 'px';
+  }
+  indicator.innerHTML = '<span class="arrow">' + arrow + '</span> ' + sat.displayName + ' EL' + pos.elevation.toFixed(0) + '\u00B0';
+  document.getElementById('markerLayer').appendChild(indicator);
 }
 
 function updateOrientationDisplay() {
