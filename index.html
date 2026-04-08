@@ -843,13 +843,15 @@ document.getElementById('startBtn').addEventListener('click', async function() {
     btn.disabled = true;
     btn.textContent = 'LOADING...';
 
+    // iOS Safari requires requestPermission() in direct user gesture context
+    // So orientation MUST be first, before any await breaks the gesture chain
+    dlog('startBtn: requesting orientation (must be first for iOS)...');
+    await requestOrientation();
+    dlog('startBtn: orientation done');
+
     dlog('startBtn: requesting geolocation...');
     await requestGeolocation();
     dlog('startBtn: geolocation done');
-
-    dlog('startBtn: requesting orientation...');
-    await requestOrientation();
-    dlog('startBtn: orientation done');
 
     dlog('startBtn: requesting camera...');
     await requestCamera();
