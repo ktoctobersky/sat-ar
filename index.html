@@ -979,6 +979,16 @@ var observerLabel = '---';
 var deviceHeading = 0;
 var devicePitch = 0;
 var deviceRoll = 0;
+
+// Smoothing state for sensor noise reduction
+var smoothHeadingSin = 0;
+var smoothHeadingCos = 1;
+var smoothPitch = 0;
+var smoothRoll = 0;
+var sensorInitialized = false;
+var HEADING_SMOOTH = 0.15;  // lower = smoother (sin/cos decomposition)
+var PITCH_SMOOTH = 0.2;     // EMA factor for pitch
+var ROLL_SMOOTH = 0.2;      // EMA factor for roll
 var cameraFOV = 65;
 var isRunning = false;
 var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
@@ -1105,9 +1115,36 @@ function handleOrientation(e) {
   } else if (typeof e.alpha === 'number') {
     heading = 360 - e.alpha;
   }
-  deviceHeading = heading;
-  devicePitch = e.beta || 0;
-  deviceRoll = e.gamma || 0;
+  var pitch = e.beta || 0;
+  var roll = e.gamma || 0;
+
+  // Low-pass filter to reduce sensor jitter
+  var headRad = heading * Math.PI / 180;
+  var rawSin = Math.sin(headRad);
+  var rawCos = Math.cos(headRad);
+
+  if (!sensorInitialized) {
+    // First reading: initialize directly
+    smoothHeadingSin = rawSin;
+    smoothHeadingCos = rawCos;
+    smoothPitch = pitch;
+    smoothRoll = roll;
+    sensorInitialized = true;
+  } else {
+    // Sin/cos decomposition handles 0°/360° wraparound correctly
+    smoothHeadingSin += HEADING_SMOOTH * (rawSin - smoothHeadingSin);
+    smoothHeadingCos += HEADING_SMOOTH * (rawCos - smoothHeadingCos);
+    // EMA for pitch and roll
+    smoothPitch += PITCH_SMOOTH * (pitch - smoothPitch);
+    smoothRoll += ROLL_SMOOTH * (roll - smoothRoll);
+  }
+
+  var smoothedHeading = Math.atan2(smoothHeadingSin, smoothHeadingCos) * 180 / Math.PI;
+  if (smoothedHeading < 0) smoothedHeading += 360;
+
+  deviceHeading = smoothedHeading;
+  devicePitch = smoothPitch;
+  deviceRoll = smoothRoll;
 }
 
 async function requestCamera() {
@@ -1434,8 +1471,9 @@ function placeSatMarker(sat, pos) {
   while (azDiff > 180) azDiff -= 360;
   while (azDiff < -180) azDiff += 360;
 
-  var deviceElevation = devicePitch - 90;
-  var elDiff = pos.elevation - (-deviceElevation);
+  // devicePitch: 0°=flat, 90°=pointing up → camera elevation = 90 - devicePitch
+  var deviceElevation = 90 - devicePitch;
+  var elDiff = pos.elevation - deviceElevation;
 
   var screenW = window.innerWidth;
   var screenH = window.innerHeight;
