@@ -836,40 +836,66 @@ var isRunning = false;
 // ============================================================
 // スタート
 // ============================================================
-document.getElementById('startBtn').addEventListener('click', async function() {
+document.getElementById('startBtn').addEventListener('click', function() {
   dlog('startBtn: clicked');
-  try {
-    var btn = document.getElementById('startBtn');
-    btn.disabled = true;
-    btn.textContent = 'LOADING...';
+  var btn = document.getElementById('startBtn');
+  btn.disabled = true;
+  btn.textContent = 'LOADING...';
 
-    // iOS Safari requires requestPermission() in direct user gesture context
-    // So orientation MUST be first, before any await breaks the gesture chain
-    dlog('startBtn: requesting orientation (must be first for iOS)...');
-    await requestOrientation();
-    dlog('startBtn: orientation done');
+  // iOS Safari: requestPermission() MUST be called synchronously in user gesture.
+  // No await/async before this call, or the gesture context is lost.
+  var orientationPermissionPromise;
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    dlog('startBtn: calling DeviceOrientationEvent.requestPermission() SYNC in gesture');
+    orientationPermissionPromise = DeviceOrientationEvent.requestPermission();
+  } else {
+    orientationPermissionPromise = Promise.resolve('not-needed');
+  }
 
-    dlog('startBtn: requesting geolocation...');
-    await requestGeolocation();
-    dlog('startBtn: geolocation done');
+  orientationPermissionPromise.then(function(state) {
+    dlog('startBtn: orientation permission result = ' + state);
+    if (state === 'granted') {
+      window.addEventListener('deviceorientation', handleOrientation, true);
+    } else if (state === 'not-needed') {
+      dlog('startBtn: orientation permission not needed (non-iOS or legacy)');
+      window.addEventListener('deviceorientation', handleOrientation, true);
+      if ('ondeviceorientationabsolute' in window) {
+        window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+      }
+    } else {
+      dlog('startBtn: orientation denied: ' + state + ' (continuing anyway)');
+    }
+    return continueStartup();
+  }).catch(function(err) {
+    dlog('startBtn: orientation permission error: ' + (err.message || err) + ' (continuing anyway)');
+    window.addEventListener('deviceorientation', handleOrientation, true);
+    return continueStartup();
+  });
 
-    dlog('startBtn: requesting camera...');
-    await requestCamera();
-    dlog('startBtn: camera done');
+  async function continueStartup() {
+    try {
+      dlog('startBtn: requesting geolocation...');
+      await requestGeolocation();
+      dlog('startBtn: geolocation done');
 
-    dlog('startBtn: switching to mainView');
-    document.getElementById('startScreen').style.display = 'none';
-    document.getElementById('mainView').style.display = 'block';
+      dlog('startBtn: requesting camera...');
+      await requestCamera();
+      dlog('startBtn: camera done');
 
-    dlog('startBtn: calling startTracking');
-    startTracking();
-    dlog('startBtn: startTracking done, app running');
-  } catch(err) {
-    dlog('startBtn: ERROR: ' + (err.message || err));
-    var btn = document.getElementById('startBtn');
-    btn.disabled = false;
-    btn.textContent = 'START TRACKING';
-    showError(err.message || '権限取得に失敗しました');
+      dlog('startBtn: switching to mainView');
+      document.getElementById('startScreen').style.display = 'none';
+      document.getElementById('mainView').style.display = 'block';
+
+      dlog('startBtn: calling startTracking');
+      startTracking();
+      dlog('startBtn: startTracking done, app running');
+    } catch(err) {
+      dlog('startBtn: ERROR: ' + (err.message || err));
+      btn.disabled = false;
+      btn.textContent = 'START TRACKING';
+      showError(err.message || '権限取得に失敗しました');
+    }
   }
 });
 
@@ -914,52 +940,8 @@ function requestGeolocation() {
   });
 }
 
-function requestOrientation() {
-  return new Promise(function(resolve, reject) {
-    if (typeof DeviceOrientationEvent === 'undefined') {
-      dlog('requestOrientation: DeviceOrientationEvent undefined');
-      resolve();
-      return;
-    }
-
-    var permissionDone = false;
-
-    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-      dlog('requestOrientation: iOS13+ permission flow');
-      DeviceOrientationEvent.requestPermission()
-        .then(function(state) {
-          dlog('requestOrientation: permission state = ' + state);
-          permissionDone = true;
-          if (state === 'granted') {
-            window.addEventListener('deviceorientation', handleOrientation, true);
-            resolve();
-          } else {
-            reject(new Error('端末の向きの権限が拒否されました: ' + state));
-          }
-        })
-        .catch(function(err) {
-          dlog('requestOrientation: permission error: ' + (err.message || err));
-          permissionDone = true;
-          reject(new Error('端末の向きの権限リクエストに失敗: ' + (err.message || err)));
-        });
-
-      setTimeout(function() {
-        if (!permissionDone) {
-          dlog('requestOrientation: TIMEOUT - permission dialog never resolved, continuing anyway');
-          window.addEventListener('deviceorientation', handleOrientation, true);
-          resolve();
-        }
-      }, 5000);
-    } else {
-      dlog('requestOrientation: legacy (no permission needed)');
-      window.addEventListener('deviceorientation', handleOrientation, true);
-      if ('ondeviceorientationabsolute' in window) {
-        window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-      }
-      resolve();
-    }
-  });
-}
+// Note: orientation permission is now handled directly in the click handler
+// to preserve user gesture context on iOS Safari.
 
 function handleOrientation(e) {
   var heading = 0;
