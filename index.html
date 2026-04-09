@@ -341,7 +341,9 @@
 
   .sat-marker {
     position: absolute;
-    transform: translate(-50%, -50%);
+    top: 50%;
+    left: 50%;
+    will-change: transform;
     pointer-events: auto;
     transition: opacity 0.3s;
     z-index: 6;
@@ -1062,6 +1064,9 @@ var PITCH_K_MIN = 0.10;
 var PITCH_K_MAX = 0.6;
 var MOVE_THRESHOLD = 3;
 var MOVE_SCALE = 15;
+var satPositions = {};  // { norad: { azimuth, elevation, rangeKm } } - 1秒ごとに更新
+var satDataCache = [];  // sorted satData array - 1秒ごとに更新、rAFで参照
+var markerEls = {};     // { norad: { marker, edge, guide, svg, pastPath, futurePath } } - 永続DOM要素
 var cameraFOV = 65;
 var isRunning = false;
 var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
@@ -1332,11 +1337,12 @@ function startTracking() {
 
   try { buildCompassBar(); } catch(e) { dlog('startTracking: buildCompassBar error: ' + e.message); }
   try { updateTleFooter(); } catch(e) { dlog('startTracking: updateTleFooter error: ' + e.message); }
+  try { initPersistentElements(); } catch(e) { dlog('startTracking: initPersistentElements error: ' + e.message); }
   try { render(); } catch(e) { dlog('startTracking: render error: ' + e.message); }
 
   try { computeNextPasses(); } catch(e) { dlog('startTracking: computeNextPasses error: ' + e.message); }
 
-  setInterval(render, 200);
+  setInterval(render, 1000);
   setInterval(updateTleFooter, 60000);
   setInterval(computeNextPasses, 60000);
   requestAnimationFrame(updateOrientationDisplay);
@@ -1529,15 +1535,12 @@ function render() {
   var now = new Date();
   document.getElementById('timeDisplay').textContent = now.toLocaleTimeString('ja-JP');
 
-  var markerLayer = document.getElementById('markerLayer');
-  markerLayer.innerHTML = '';
-  edgeSlotIndex = 0;
-
   // 全衛星の位置を計算してソート
   var satData = [];
   TRACKED_SATS.forEach(function(sat) {
     var pos = computeSatPosition(sat, now);
     if (!pos) return;
+    satPositions[sat.norad] = pos;  // rAF用に保存
     var pass = nextPassCache[sat.norad] || null;
     satData.push({ sat: sat, pos: pos, pass: pass });
   });
@@ -1552,6 +1555,8 @@ function render() {
     var bTime = (b.pass && b.pass.riseTime) ? b.pass.riseTime.getTime() : Infinity;
     return aTime - bTime;
   });
+
+  satDataCache = satData;  // rAF用に保存
 
   // 自動追跡: 可視衛星 + 次に来る2機
   var newAutoTracked = [];
@@ -1646,252 +1651,266 @@ function render() {
     });
   }
 
-  // ---- 軌道弧の描画（マーカーの下に描画するため先に処理） ----
+  // ---- マーカーラベルの仰角を更新（位置更新はrAFで行う） ----
   satData.forEach(function(item) {
-    var visible = item.pos.elevation > 0;
-    var tracked = isSatTracked(item.sat.norad);
-    if ((visible || tracked) && item.pass && item.pass.trajectory) {
-      drawOrbitPath(item.sat, item.pass.trajectory);
-    }
-  });
-
-  // ---- AR マーカー + エッジインジケータ ----
-  satData.forEach(function(item) {
-    var sat = item.sat;
-    var pos = item.pos;
-    var pass = item.pass;
-    var visible = pos.elevation > 0;
-    var tracked = isSatTracked(sat.norad);
-
-    if (visible) {
-      var inFov = placeSatMarker(sat, pos);
-      if (!inFov) placeEdgeIndicator(sat, pos, null);
-    } else if (tracked && pass && pass.riseTime) {
-      // 地平線以下だが追跡対象: 昇る方位を示すエッジインジケータ
-      placeEdgeIndicator(sat, { azimuth: pass.azAtRise, elevation: 0 }, pass);
+    var elems = markerEls[item.sat.norad];
+    if (!elems) return;
+    var metaEl = elems.marker.querySelector('.meta');
+    if (metaEl) {
+      metaEl.innerHTML = item.sat.freq + ' &middot; EL ' + item.pos.elevation.toFixed(0) + '&deg;';
     }
   });
 }
 
-function placeSatMarker(sat, pos) {
-  var azDiff = pos.azimuth - deviceHeading;
-  while (azDiff > 180) azDiff -= 360;
-  while (azDiff < -180) azDiff += 360;
+// ============================================================
+// 永続的なDOM要素の初期化（startTracking時に1回だけ呼ぶ）
+// ============================================================
+function initPersistentElements() {
+  var markerLayer = document.getElementById('markerLayer');
+  var svgNs = 'http://www.w3.org/2000/svg';
+  var colorMap = { iss: '#ff6b47', fm: '#4fb3d9', linear: '#b88ce8', digi: '#9be892' };
 
-  var elDiff = pos.elevation - deviceElevation;
+  TRACKED_SATS.forEach(function(sat) {
+    var dotColor = getSatColor(sat.type);
+    var strokeColor = colorMap[sat.type] || '#ffffff';
 
-  var screenW = window.innerWidth;
-  var screenH = window.innerHeight;
-  var halfFovH = cameraFOV / 2;
-  var halfFovV = (cameraFOV * screenH / screenW) / 2;
+    // 軌道弧SVG（マーカーより前に追加してz-index順を守る）
+    var svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('class', 'orbit-svg');
+    var pastPath = document.createElementNS(svgNs, 'path');
+    pastPath.setAttribute('class', 'orbit-path');
+    pastPath.setAttribute('stroke', strokeColor);
+    var futurePath = document.createElementNS(svgNs, 'path');
+    futurePath.setAttribute('class', 'orbit-path-future');
+    futurePath.setAttribute('stroke', strokeColor);
+    svg.appendChild(pastPath);
+    svg.appendChild(futurePath);
+    svg.style.display = 'none';
+    markerLayer.appendChild(svg);
 
-  if (Math.abs(azDiff) > halfFovH + 10 || Math.abs(elDiff) > halfFovV + 10) return false;
+    // 衛星マーカー
+    var marker = document.createElement('div');
+    marker.className = 'sat-marker ' + sat.type;
+    marker.innerHTML =
+      '<div class="ring"><div class="dot"></div></div>' +
+      '<div class="label">' +
+        '<span class="name">' + sat.displayName + '</span>' +
+        '<span class="meta">' + sat.freq + ' &middot; EL --&deg;</span>' +
+      '</div>';
+    marker.style.display = 'none';
+    markerLayer.appendChild(marker);
 
-  var x = screenW / 2 + (azDiff / halfFovH) * (screenW / 2);
-  var y = screenH / 2 - (elDiff / halfFovV) * (screenH / 2);
+    // エッジインジケータ
+    var edge = document.createElement('div');
+    edge.className = 'sat-edge-indicator';
+    edge.style.color = dotColor;
+    edge.style.borderColor = dotColor;
+    edge.style.display = 'none';
+    markerLayer.appendChild(edge);
 
-  var marker = document.createElement('div');
-  marker.className = 'sat-marker ' + sat.type;
-  marker.style.left = x + 'px';
-  marker.style.top = y + 'px';
-  marker.innerHTML =
-    '<div class="ring"><div class="dot"></div></div>' +
-    '<div class="label">' +
-      '<span class="name">' + sat.displayName + '</span>' +
-      '<span class="meta">' + sat.freq + ' &middot; EL ' + pos.elevation.toFixed(0) + '&deg;</span>' +
-    '</div>';
-  document.getElementById('markerLayer').appendChild(marker);
-  return true;
+    // ガイド要素
+    var guide = document.createElement('div');
+    guide.className = 'sat-guide';
+    guide.style.color = dotColor;
+    guide.style.borderColor = dotColor;
+    guide.style.display = 'none';
+    markerLayer.appendChild(guide);
+
+    markerEls[sat.norad] = {
+      marker: marker,
+      edge: edge,
+      guide: guide,
+      svg: svg,
+      pastPath: pastPath,
+      futurePath: futurePath
+    };
+  });
 }
 
-function drawOrbitPath(sat, trajectory) {
-  if (!trajectory || trajectory.length < 2) return;
+// ============================================================
+// rAF毎フレーム: マーカー位置・エッジインジケータ・軌道弧を更新
+// ============================================================
+function positionMarkersAndEdges() {
+  if (!isRunning || !observer || satDataCache.length === 0) return;
 
   var screenW = window.innerWidth;
   var screenH = window.innerHeight;
   var halfFovH = cameraFOV / 2;
   var halfFovV = (cameraFOV * screenH / screenW) / 2;
   var nowMs = Date.now();
-  var dotColor = getSatColor(sat.type);
+  var slotIndex = 0;
 
-  // 軌道点をスクリーン座標に変換
-  var points = [];
-  for (var i = 0; i < trajectory.length; i++) {
-    var pt = trajectory[i];
+  satDataCache.forEach(function(item) {
+    var sat = item.sat;
+    var pos = satPositions[sat.norad];
+    var pass = item.pass;
+    var elems = markerEls[sat.norad];
+    if (!pos || !elems) return;
+
+    var visible = pos.elevation > 0;
+    var tracked = isSatTracked(sat.norad);
+
+    // 方位差・仰角差を計算
+    var azDiff = pos.azimuth - deviceHeading;
+    while (azDiff > 180) azDiff -= 360;
+    while (azDiff < -180) azDiff += 360;
+    var elDiff = pos.elevation - deviceElevation;
+
+    // 画面中心からのオフセット（ピクセル）
+    var xOff = (azDiff / halfFovH) * (screenW / 2);
+    var yOff = -(elDiff / halfFovV) * (screenH / 2);
+
+    var inFov = Math.abs(azDiff) <= halfFovH + 10 && Math.abs(elDiff) <= halfFovV + 10;
+
+    // ---- 衛星マーカー ----
+    if (visible && inFov) {
+      // top:50% left:50% からのオフセットとして transform で配置（GPU合成レイヤー使用）
+      elems.marker.style.transform =
+        'translate(calc(-50% + ' + xOff.toFixed(1) + 'px), calc(-50% + ' + yOff.toFixed(1) + 'px))';
+      elems.marker.style.display = '';
+      elems.edge.style.display = 'none';
+      elems.guide.style.display = 'none';
+    } else {
+      elems.marker.style.display = 'none';
+
+      // エッジインジケータまたはガイドを表示
+      var showEdge = visible || (tracked && pass && pass.riseTime);
+      if (showEdge) {
+        var edgeAz = visible ? pos.azimuth : pass.azAtRise;
+        var edgeAzDiff = edgeAz - deviceHeading;
+        while (edgeAzDiff > 180) edgeAzDiff -= 360;
+        while (edgeAzDiff < -180) edgeAzDiff += 360;
+
+        if (Math.abs(edgeAzDiff) < halfFovH) {
+          // 方位が合っている → ガイド表示（仰角方向を誘導）
+          var xPercent = 50 + (edgeAzDiff / halfFovH) * 50;
+          var arrowSymbol, elHint;
+          if (visible) {
+            var elDiff2 = pos.elevation - deviceElevation;
+            if (elDiff2 > 8) {
+              arrowSymbol = '\u25B2';
+              elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2191 (+' + Math.round(elDiff2) + '\u00B0)';
+            } else if (elDiff2 < -8) {
+              arrowSymbol = '\u25BC';
+              elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2193 (' + Math.round(elDiff2) + '\u00B0)';
+            } else {
+              arrowSymbol = '\u25CF';
+              elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2714';
+            }
+          } else {
+            var timeText = pass ? formatTimeUntil(pass.riseTime) : '?';
+            if (deviceElevation > 8) {
+              arrowSymbol = '\u25BC';
+              elHint = timeText + ' \u00B7 \u2193 horizon';
+            } else if (deviceElevation < -8) {
+              arrowSymbol = '\u25B2';
+              elHint = timeText + ' \u00B7 \u2191 horizon';
+            } else {
+              arrowSymbol = '\u23F3';
+              elHint = timeText + ' \u00B7 max ' + (pass ? pass.maxEl : '?') + '\u00B0';
+            }
+          }
+          elems.guide.style.display = '';
+          elems.guide.style.left = xPercent + '%';
+          elems.guide.style.top = (screenH * 0.35 + slotIndex * 55) + 'px';
+          elems.guide.innerHTML =
+            '<div class="guide-arrow">' + arrowSymbol + '</div>' +
+            '<div class="guide-name">' + sat.displayName + '</div>' +
+            '<div class="guide-detail">' + elHint + '</div>';
+          elems.edge.style.display = 'none';
+        } else {
+          // 方位がずれている → 画面端にエッジインジケータ
+          var arrow = edgeAzDiff < 0 ? '\u25C0' : '\u25B6';
+          var yBase = 160 + slotIndex * 55;
+          if (yBase > screenH - 180) yBase = 160 + (slotIndex % 3) * 55;
+
+          var detailText = '';
+          if (pass && pass.riseTime) {
+            detailText = '<div class="edge-detail">' + formatTimeUntil(pass.riseTime) + ' \u00B7 max ' + pass.maxEl + '\u00B0</div>';
+          } else if (visible) {
+            detailText = '<div class="edge-detail">EL ' + pos.elevation.toFixed(0) + '\u00B0</div>';
+          }
+          elems.edge.style.display = '';
+          elems.edge.style.top = yBase + 'px';
+          elems.edge.style.left = '';
+          elems.edge.style.right = '';
+          if (edgeAzDiff < 0) {
+            elems.edge.style.left = '8px';
+          } else {
+            elems.edge.style.right = '8px';
+          }
+          elems.edge.innerHTML = '<span class="arrow">' + arrow + '</span><div>' + sat.displayName + detailText + '</div>';
+          elems.guide.style.display = 'none';
+        }
+        slotIndex++;
+      } else {
+        elems.edge.style.display = 'none';
+        elems.guide.style.display = 'none';
+      }
+    }
+
+    // ---- 軌道弧SVGをrAFで更新（端末の向きに追随） ----
+    if ((visible || tracked) && pass && pass.trajectory && pass.trajectory.length >= 2) {
+      updateOrbitSvgPath(elems, pass.trajectory, screenW, screenH, halfFovH, halfFovV, nowMs);
+    } else {
+      elems.svg.style.display = 'none';
+    }
+  });
+}
+
+function buildSvgPathD(pts) {
+  if (pts.length < 2) return '';
+  var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+  for (var i = 1; i < pts.length; i++) {
+    d += 'L' + pts[i].x.toFixed(1) + ',' + pts[i].y.toFixed(1);
+  }
+  return d;
+}
+
+function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfFovV, nowMs) {
+  var margin = 60;
+
+  // 軌道点を現在の向きでスクリーン座標に変換
+  var points = trajectory.map(function(pt) {
     var azDiff = pt.az - deviceHeading;
     while (azDiff > 180) azDiff -= 360;
     while (azDiff < -180) azDiff += 360;
     var elDiff = pt.el - deviceElevation;
-    points.push({
+    return {
       x: screenW / 2 + (azDiff / halfFovH) * (screenW / 2),
       y: screenH / 2 - (elDiff / halfFovV) * (screenH / 2),
       time: pt.time
-    });
+    };
+  });
+
+  // 画面内に1点でもあるか確認
+  var anyVisible = points.some(function(p) {
+    return p.x > -margin && p.x < screenW + margin &&
+           p.y > -margin && p.y < screenH + margin;
+  });
+  if (!anyVisible) {
+    elems.svg.style.display = 'none';
+    return;
   }
 
-  // 画面内に1点でもあるか確認（マージン付き）
-  var margin = 60;
-  var anyVisible = false;
-  for (var i = 0; i < points.length; i++) {
-    if (points[i].x > -margin && points[i].x < screenW + margin &&
-        points[i].y > -margin && points[i].y < screenH + margin) {
-      anyVisible = true;
-      break;
-    }
-  }
-  if (!anyVisible) return;
-
-  // SVG要素を作成
-  var svgNs = 'http://www.w3.org/2000/svg';
-  var svg = document.createElementNS(svgNs, 'svg');
-  svg.setAttribute('class', 'orbit-svg');
-  svg.setAttribute('viewBox', '0 0 ' + screenW + ' ' + screenH);
+  elems.svg.setAttribute('viewBox', '0 0 ' + screenW + ' ' + screenH);
+  elems.svg.style.display = '';
 
   // 過去の軌道（実線）と未来の軌道（破線）を分離
-  var pastPts = [];
-  var futurePts = [];
+  var pastPts = [], futurePts = [];
   for (var i = 0; i < points.length; i++) {
     if (points[i].time <= nowMs) {
       pastPts.push(points[i]);
     } else {
       if (pastPts.length > 0 && futurePts.length === 0) {
-        futurePts.push(pastPts[pastPts.length - 1]); // 接続点
+        futurePts.push(pastPts[pastPts.length - 1]);
       }
       futurePts.push(points[i]);
     }
   }
 
-  // パス描画ヘルパー
-  function buildPath(pts) {
-    if (pts.length < 2) return '';
-    var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
-    for (var i = 1; i < pts.length; i++) {
-      d += 'L' + pts[i].x.toFixed(1) + ',' + pts[i].y.toFixed(1);
-    }
-    return d;
-  }
-
-  // CSSカスタムプロパティを実際の色に変換
-  var colorMap = {
-    'var(--iss)': '#ff6b47',
-    'var(--fm-sat)': '#4fb3d9',
-    'var(--linear)': '#b88ce8',
-    'var(--digi)': '#9be892'
-  };
-  var strokeColor = colorMap[dotColor] || '#FFFFFF';
-
-  if (pastPts.length >= 2) {
-    var path = document.createElementNS(svgNs, 'path');
-    path.setAttribute('d', buildPath(pastPts));
-    path.setAttribute('class', 'orbit-path');
-    path.setAttribute('stroke', strokeColor);
-    svg.appendChild(path);
-  }
-  if (futurePts.length >= 2) {
-    var path = document.createElementNS(svgNs, 'path');
-    path.setAttribute('d', buildPath(futurePts));
-    path.setAttribute('class', 'orbit-path-future');
-    path.setAttribute('stroke', strokeColor);
-    svg.appendChild(path);
-  }
-
-  document.getElementById('markerLayer').appendChild(svg);
-}
-
-var edgeSlotIndex = 0; // reset each render frame
-
-function placeEdgeIndicator(sat, pos, pass) {
-  var azDiff = pos.azimuth - deviceHeading;
-  while (azDiff > 180) azDiff -= 360;
-  while (azDiff < -180) azDiff += 360;
-
-  var screenW = window.innerWidth;
-  var screenH = window.innerHeight;
-  var margin = 8;
-  var dotColor = getSatColor(sat.type);
-  var halfFovH = cameraFOV / 2;
-
-  // 方位がほぼ合っている場合 → 画面中央にガイド表示
-  if (Math.abs(azDiff) < halfFovH) {
-    var guide = document.createElement('div');
-    guide.className = 'sat-guide';
-    guide.style.color = dotColor;
-    guide.style.borderColor = dotColor;
-
-    // 画面上のX位置を方位差から計算
-    var xPercent = 50 + (azDiff / halfFovH) * 50;
-    guide.style.left = xPercent + '%';
-
-    var arrowSymbol, elHint;
-    if (pos.elevation > 0) {
-      // 可視衛星 → 仰角方向を示す
-      var elDiff = pos.elevation - deviceElevation;
-      if (elDiff > 8) { arrowSymbol = '\u25B2'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2191 (+' + Math.round(elDiff) + '\u00B0)'; }
-      else if (elDiff < -8) { arrowSymbol = '\u25BC'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2193 (' + Math.round(elDiff) + '\u00B0)'; }
-      else { arrowSymbol = '\u25CF'; elHint = 'EL ' + pos.elevation.toFixed(0) + '\u00B0 \u2714'; }
-    } else {
-      // 地平線以下 → 地平線(EL 0°)方向へ誘導
-      var elDiffToHorizon = 0 - deviceElevation; // 地平線との差
-      var timeText = pass ? formatTimeUntil(pass.riseTime) : '?';
-      if (deviceElevation > 8) {
-        arrowSymbol = '\u25BC'; // 上を向きすぎ → 下げて
-        elHint = timeText + ' · \u2193 horizon';
-      } else if (deviceElevation < -8) {
-        arrowSymbol = '\u25B2'; // 下を向きすぎ → 上げて
-        elHint = timeText + ' · \u2191 horizon';
-      } else {
-        arrowSymbol = '\u23F3'; // ⏳ 方位OK・仰角OK → 待つだけ
-        elHint = timeText + ' · max ' + (pass ? pass.maxEl : '?') + '\u00B0';
-      }
-    }
-
-    // Y位置: 画面中央寄り、スロットでずらす
-    guide.style.top = (screenH * 0.35 + edgeSlotIndex * 55) + 'px';
-
-    // デバッグ情報（?debug=1 時のみ）
-    var debugStr = '';
-    if (new URLSearchParams(window.location.search).get('debug') === '1') {
-      debugStr = '<div class="guide-detail" style="opacity:0.5">pitch=' + devicePitch.toFixed(0) + ' devEL=' + deviceElevation.toFixed(0) + ' satEL=' + pos.elevation.toFixed(0) + '</div>';
-    }
-
-    guide.innerHTML =
-      '<div class="guide-arrow">' + arrowSymbol + '</div>' +
-      '<div class="guide-name">' + sat.displayName + '</div>' +
-      '<div class="guide-detail">' + elHint + '</div>' + debugStr;
-    document.getElementById('markerLayer').appendChild(guide);
-    edgeSlotIndex++;
-    return;
-  }
-
-  // 方位がずれている場合 → 画面端にエッジインジケータ
-  var arrow = azDiff < 0 ? '\u25C0' : '\u25B6';
-
-  // Y位置をスロットでずらして重なり防止
-  var yBase = 160 + edgeSlotIndex * 55;
-  if (yBase > screenH - 180) yBase = 160 + (edgeSlotIndex % 3) * 55;
-
-  var detailText = '';
-  if (pass && pass.riseTime) {
-    detailText = '<div class="edge-detail">' + formatTimeUntil(pass.riseTime) + ' · max ' + pass.maxEl + '°</div>';
-  } else if (pos.elevation > 0) {
-    detailText = '<div class="edge-detail">EL ' + pos.elevation.toFixed(0) + '°</div>';
-  }
-
-  var indicator = document.createElement('div');
-  indicator.className = 'sat-edge-indicator';
-  indicator.style.color = dotColor;
-  indicator.style.borderColor = dotColor;
-  indicator.style.top = yBase + 'px';
-
-  if (azDiff < 0) {
-    indicator.style.left = margin + 'px';
-  } else {
-    indicator.style.right = margin + 'px';
-  }
-
-  indicator.innerHTML = '<span class="arrow">' + arrow + '</span><div>' + sat.displayName + detailText + '</div>';
-  document.getElementById('markerLayer').appendChild(indicator);
-  edgeSlotIndex++;
+  elems.pastPath.setAttribute('d', buildSvgPathD(pastPts));
+  elems.futurePath.setAttribute('d', buildSvgPathD(futurePts));
 }
 
 function updateOrientationDisplay() {
@@ -1909,6 +1928,8 @@ function updateOrientationDisplay() {
   var barCenterOffset = compassBar.parentElement.offsetWidth / 2;
   var offset = barCenterOffset - (deviceHeading * tickWidth / 10) - tickWidth / 2;
   compassBar.style.transform = 'translateX(' + offset + 'px)';
+
+  positionMarkersAndEdges();  // センサー更新に合わせてマーカー位置を毎フレーム更新
 
   if (isRunning) requestAnimationFrame(updateOrientationDisplay);
 }
