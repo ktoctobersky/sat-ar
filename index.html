@@ -1173,11 +1173,12 @@ var HEADING_SNAP_STEP_DEG = 0;       // 0で無効（連続角で表示）
 var HEADING_SNAP_HYST_DEG = 1.5;     // 境界付近の行き来を防ぐヒステリシス
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
 var HEADING_WINDOW_SIZE = 7;         // 方位の短窓ロバスト平均
-var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 出力方位の最大追従速度
+var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 実回転は追従しつつ、瞬間ジャンプのみ抑制
 var ORIENTATION_DT_DEFAULT_SEC = 1 / 60;
 var ORIENTATION_DT_MAX_SEC = 0.2;
-var HEADING_TRIM_MIN_SAMPLES = 5;    // トリム平均を有効化する最小サンプル数
-var HEADING_TRIM_COUNT = 1;
+var HEADING_TRIM_MIN_SAMPLES = 5;    // 5〜7サンプル窓でトリム平均を有効化
+var HEADING_TRIM_COUNT = 1;          // 両端1サンプル除去
+var CAL_ALPHA_MAX_AGE_MS = 2000;
 var MAG_CORR_STRONG_RATE_MAX = 35;
 var MAG_CORR_STRONG_RESIDUAL_MAX = 35;
 var MAG_CORR_MEDIUM_RESIDUAL_MAX = 60;
@@ -1193,6 +1194,7 @@ var HEADING_EMA_K_MID = 0.22;
 var _headingWindow = [];
 var _lastOrientationTs = 0;
 var _lastAlphaHeading = null;
+var _lastAlphaUpdatedTs = 0;
 var _hasOutputHeading = false;
 var _lastOutputHeading = 0;
 var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
@@ -1413,6 +1415,7 @@ function handleOrientation(e) {
     }
     heading = alphaHeading + compassOffset;
     _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else if (e.absolute && alphaHeading !== null) {
     // Android absolute: alpha IS the compass heading
     heading = alphaHeading;
@@ -1420,6 +1423,7 @@ function handleOrientation(e) {
       alphaRateDegPerSec = Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
     }
     _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else if (rawCompass !== null) {
     heading = rawCompass;
   } else if (alphaHeading !== null) {
@@ -1428,6 +1432,7 @@ function handleOrientation(e) {
       alphaRateDegPerSec = Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
     }
     _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else {
     heading = 0;
   }
@@ -1585,7 +1590,8 @@ function startTracking() {
   // CAL button: recalibrate compass offset from the latest raw magnetometer reading
   document.getElementById('calBtn').addEventListener('click', function() {
     var btn = this;
-    if (_lastRawCompass !== null && _emaInited && _lastAlphaHeading !== null) {
+    if (_lastRawCompass !== null && _emaInited && _lastAlphaHeading !== null &&
+        (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
       // Compute the current alpha-based heading (without any offset)
       var currentAlpha = _lastAlphaHeading;
       var newOffset = _lastRawCompass - currentAlpha;
