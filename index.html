@@ -1056,12 +1056,12 @@ var sensorInitialized = false;
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
 // Compass offset correction
 var COMPASS_OFFSET_K = 0.005;  // offset correction per event (~3s convergence at 60Hz)
-var HEADING_SMOOTH_K = 0.4;     // display smoothing (alpha is already OS-fused, light)
+var HEADING_SMOOTH_K = 0.07;   // display smoothing — low = stable (AR.js style ~0.05–0.10)
 // Pitch smoothing parameters
-var PITCH_K_MIN = 0.10;
-var PITCH_K_MAX = 0.6;
-var MOVE_THRESHOLD = 3;
-var MOVE_SCALE = 15;
+var PITCH_K_MIN = 0.05;        // very stable when not moving
+var PITCH_K_MAX = 0.25;        // responsive when moving quickly
+var MOVE_THRESHOLD = 5;        // dead-zone (degrees) before adaptive smoothing kicks in
+var MOVE_SCALE = 20;
 var cameraFOV = 65;
 var isRunning = false;
 var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
@@ -1104,9 +1104,15 @@ document.getElementById('startBtn').addEventListener('click', function() {
     dlog('startBtn: permission results orientation=' + orientState + ' motion=' + motionState);
 
     if (orientState === 'granted' || orientState === 'not-needed') {
-      window.addEventListener('deviceorientation', handleOrientation, true);
+      // Prefer deviceorientationabsolute (Android Chrome) which always carries
+      // absolute heading (e.absolute === true).  Fall back to deviceorientation
+      // (iOS Safari) which supplies webkitCompassHeading for absolute calibration.
+      // Subscribing to BOTH on Android would call handleOrientation twice per frame
+      // with alternating relative/absolute alpha values, causing heading jitter.
       if ('ondeviceorientationabsolute' in window) {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation, true);
       }
     }
     // DeviceMotion permission kept for future use but no listener needed —
@@ -1118,7 +1124,11 @@ document.getElementById('startBtn').addEventListener('click', function() {
     return continueStartup();
   }).catch(function(err) {
     dlog('startBtn: permission error: ' + (err.message || err) + ' (continuing anyway)');
-    window.addEventListener('deviceorientation', handleOrientation, true);
+    if ('ondeviceorientationabsolute' in window) {
+      window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+    } else {
+      window.addEventListener('deviceorientation', handleOrientation, true);
+    }
     return continueStartup();
   });
 
