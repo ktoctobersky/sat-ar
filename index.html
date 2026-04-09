@@ -1920,7 +1920,7 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
 }
 
 var _lastMarkerUpdateMs = 0;
-var MARKER_UPDATE_INTERVAL_MS = 100;  // marker position update rate: ~10fps
+var MARKER_UPDATE_INTERVAL_MS = 1000;  // marker position update rate: 1fps
 
 function updateOrientationDisplay() {
   var headingBig = document.getElementById('headingBig');
