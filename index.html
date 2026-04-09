@@ -1057,7 +1057,9 @@ document.getElementById('startBtn').addEventListener('click', function() {
 
   // iOS Safari: requestPermission() MUST be called synchronously in user gesture.
   // No await/async before this call, or the gesture context is lost.
+  // Both orientation (compass) and motion (gyroscope) need separate permissions on iOS 13+.
   var orientationPermissionPromise;
+  var motionPermissionPromise;
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
     dlog('startBtn: calling DeviceOrientationEvent.requestPermission() SYNC in gesture');
@@ -1065,25 +1067,35 @@ document.getElementById('startBtn').addEventListener('click', function() {
   } else {
     orientationPermissionPromise = Promise.resolve('not-needed');
   }
+  if (typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function') {
+    dlog('startBtn: calling DeviceMotionEvent.requestPermission() SYNC in gesture');
+    motionPermissionPromise = DeviceMotionEvent.requestPermission();
+  } else {
+    motionPermissionPromise = Promise.resolve('not-needed');
+  }
 
-  orientationPermissionPromise.then(function(state) {
-    dlog('startBtn: orientation permission result = ' + state);
-    if (state === 'granted') {
+  Promise.all([orientationPermissionPromise, motionPermissionPromise]).then(function(results) {
+    var orientState = results[0];
+    var motionState = results[1];
+    dlog('startBtn: permission results orientation=' + orientState + ' motion=' + motionState);
+
+    if (orientState === 'granted' || orientState === 'not-needed') {
       window.addEventListener('deviceorientation', handleOrientation, true);
-      window.addEventListener('devicemotion', handleGyro, true);
-    } else if (state === 'not-needed') {
-      dlog('startBtn: orientation permission not needed (non-iOS or legacy)');
-      window.addEventListener('deviceorientation', handleOrientation, true);
-      window.addEventListener('devicemotion', handleGyro, true);
       if ('ondeviceorientationabsolute' in window) {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
       }
-    } else {
-      dlog('startBtn: orientation denied: ' + state + ' (continuing anyway)');
+    }
+    if (motionState === 'granted' || motionState === 'not-needed') {
+      window.addEventListener('devicemotion', handleGyro, true);
+    }
+
+    if (orientState === 'denied' && motionState === 'denied') {
+      dlog('startBtn: both permissions denied (continuing anyway)');
     }
     return continueStartup();
   }).catch(function(err) {
-    dlog('startBtn: orientation permission error: ' + (err.message || err) + ' (continuing anyway)');
+    dlog('startBtn: permission error: ' + (err.message || err) + ' (continuing anyway)');
     window.addEventListener('deviceorientation', handleOrientation, true);
     window.addEventListener('devicemotion', handleGyro, true);
     return continueStartup();
