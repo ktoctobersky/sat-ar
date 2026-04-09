@@ -1067,6 +1067,9 @@ var _emaHdgSin = 0;    // EMA of sin(heading)
 var _emaHdgCos = 1;    // EMA of cos(heading)
 var _emaElev   = 0;    // EMA of elevation
 var _emaInited = false; // seed first sample directly to avoid cold-start lag
+var HEADING_SNAP_STEP_DEG = 5;       // 0で無効。5°刻みで安定化
+var HEADING_SNAP_HYST_DEG = 1.5;     // 境界付近の行き来を防ぐヒステリシス
+var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
 // to convert the relative alpha into an absolute (true-north) heading.
@@ -1291,8 +1294,30 @@ function handleOrientation(e) {
   var smoothedHeading = Math.atan2(_emaHdgSin, _emaHdgCos) * 180 / Math.PI;
   if (smoothedHeading < 0) smoothedHeading += 360;
 
-  deviceHeading   = smoothedHeading;
+  deviceHeading   = snapHeadingByStepWithHysteresis(smoothedHeading);
   deviceElevation = _emaElev;
+}
+
+function snapHeadingByStepWithHysteresis(heading) {
+  var normalized = ((heading % 360) + 360) % 360;
+  if (!(HEADING_SNAP_STEP_DEG > 0)) return normalized;
+
+  var step = HEADING_SNAP_STEP_DEG;
+  var candidate = Math.round(normalized / step) * step;
+  if (candidate >= 360) candidate -= 360;
+
+  if (_snappedHeading === null) {
+    _snappedHeading = candidate;
+    return _snappedHeading;
+  }
+  if (candidate === _snappedHeading) return _snappedHeading;
+
+  var diffFromCurrent = Math.abs(normalizeAzDiff(normalized - _snappedHeading));
+  var switchThreshold = step / 2 + HEADING_SNAP_HYST_DEG;
+  if (diffFromCurrent >= switchThreshold) {
+    _snappedHeading = candidate;
+  }
+  return _snappedHeading;
 }
 
 async function requestCamera() {
@@ -1363,6 +1388,7 @@ function startTracking() {
       var newHeadRad = ((((currentAlpha + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
       _emaHdgSin = Math.sin(newHeadRad);
       _emaHdgCos = Math.cos(newHeadRad);
+      _snappedHeading = null;
       dlog('calBtn: reseeded compassOffset=' + compassOffset.toFixed(1));
     }
     // Flash the button to give tactile feedback
