@@ -245,6 +245,21 @@
     font-size: 10px;
     text-align: right;
   }
+  .cal-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    background: transparent;
+    color: var(--ink-dim);
+    border: 1px solid var(--grid);
+    cursor: pointer;
+    margin-top: 4px;
+    display: inline-block;
+  }
+  .cal-btn:active { background: rgba(244, 197, 107, 0.15); color: var(--accent); }
+  .cal-btn.flash { color: var(--accent); border-color: var(--accent); }
   .hud-compass .big {
     font-size: 22px;
     color: var(--accent);
@@ -813,6 +828,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
         <div class="big" id="headingBig">---&deg;</div>
         <div class="label" id="headingCard">---</div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);opacity:0.7;margin-top:2px" id="elevationLabel">EL ---°</div>
+        <button class="cal-btn" id="calBtn" aria-label="Recalibrate compass heading">CAL</button>
       </div>
     </div>
 
@@ -1051,10 +1067,13 @@ var _emaHdgSin = 0;    // EMA of sin(heading)
 var _emaHdgCos = 1;    // EMA of cos(heading)
 var _emaElev   = 0;    // EMA of elevation
 var _emaInited = false; // seed first sample directly to avoid cold-start lag
-// Heading: OS-fused alpha + compass offset for absolute calibration
+// Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
+// compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
+// to convert the relative alpha into an absolute (true-north) heading.
+// Continuous magnetometer correction is intentionally disabled: raw webkitCompassHeading
+// is too noisy and causes visible arc jitter even when the device is stationary.
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
-// Compass offset correction
-var COMPASS_OFFSET_K = 0.005;  // offset correction per event (~3s convergence at 60Hz)
+var _lastRawCompass = null;     // most recent webkitCompassHeading, used by CAL button
 var satPositions = {};  // { norad: { azimuth, elevation, rangeKm } } - 1秒ごとに更新
 var satDataCache = [];  // sorted satData array - 1秒ごとに更新、rAFで参照
 var markerEls = {};     // { norad: { marker, edge, guide, svg, pastPath, futurePath } } - 永続DOM要素
@@ -1199,44 +1218,42 @@ function requestGeolocation() {
 // Orientation handler: uses OS-fused alpha/beta/gamma directly.
 // iOS's deviceorientation already combines gyro+accel+mag internally —
 // manual gyro integration would fight the OS fusion and cause jitter.
+//
+// Heading strategy (gyro-primary, mag-on-demand):
+//   iOS: alpha is the OS-fused heading (smooth, gyro-driven) but relative to
+//        the device's starting direction. compassOffset converts it to absolute
+//        north. The offset is set once at startup and only updated when the
+//        user taps the CAL button — continuous magnetometer correction is
+//        deliberately skipped because webkitCompassHeading is too noisy and
+//        causes visible arc jitter even when the device is stationary.
+//   Android: alpha is already absolute (true north) when e.absolute === true.
 function handleOrientation(e) {
   var pitch = e.beta || 0;
   var roll = e.gamma || 0;
-  var compassAccuracy = e.webkitCompassAccuracy || 999;
 
   // --- Heading ---
-  // iOS: alpha is OS-fused (smooth, responsive) but relative to initial direction.
-  //      webkitCompassHeading is raw magnetometer (absolute but noisy).
-  //      Strategy: use alpha for smooth tracking, compass to calibrate absolute offset.
-  // Android: alpha is absolute when e.absolute === true; use directly.
-  var alphaHeading = null; // OS-fused heading (CW, relative or absolute)
-  var rawCompass = null;   // raw magnetometer heading (CW from north)
+  var alphaHeading = null; // OS-fused heading (CW, relative on iOS / absolute on Android)
+  var rawCompass = null;   // raw magnetometer heading (CW from north, iOS only)
 
   if (typeof e.alpha === 'number') {
     alphaHeading = (360 - e.alpha) % 360; // convert CCW alpha to CW heading
   }
   if (typeof e.webkitCompassHeading === 'number') {
     rawCompass = e.webkitCompassHeading; // iOS only, absolute from magnetometer
+    _lastRawCompass = rawCompass;        // keep for CAL button
   }
 
   var heading;
   if (alphaHeading !== null && rawCompass !== null) {
-    // iOS: alpha is relative → calibrate with compass offset
+    // iOS: alpha is relative → calibrate with compassOffset (set at startup or by CAL button)
     if (!_emaInited) {
+      // First sample: seed the offset from the raw compass so we start pointing north
       compassOffset = rawCompass - alphaHeading;
       if (compassOffset > 180) compassOffset -= 360;
       if (compassOffset < -180) compassOffset += 360;
-    } else if (compassAccuracy < 50) {
-      // Slowly update offset to track magnetic drift
-      var expectedOffset = rawCompass - alphaHeading;
-      var offsetDiff = expectedOffset - compassOffset;
-      if (offsetDiff > 180) offsetDiff -= 360;
-      if (offsetDiff < -180) offsetDiff += 360;
-      // Clamp large corrections (magnetic interference near trains/buildings)
-      if (Math.abs(offsetDiff) > 30) offsetDiff = 0; // ignore wild compass jumps
-      var corrK = compassAccuracy > 25 ? COMPASS_OFFSET_K * 0.3 : COMPASS_OFFSET_K;
-      compassOffset += offsetDiff * corrK;
     }
+    // No continuous magnetometer correction here — that is what caused the jitter.
+    // The CAL button lets the user re-calibrate on demand.
     heading = alphaHeading + compassOffset;
   } else if (e.absolute && alphaHeading !== null) {
     // Android absolute: alpha IS the compass heading
@@ -1250,7 +1267,7 @@ function handleOrientation(e) {
   }
   heading = ((heading % 360) + 360) % 360;
 
-  // --- Compass offset calibration (absolute heading from OS-fused alpha) ---
+  // --- Elevation from pitch/roll ---
   var headRad = heading * Math.PI / 180;
   var rawSin = Math.sin(headRad);
   var rawCos = Math.cos(headRad);
@@ -1331,6 +1348,27 @@ function startTracking() {
   try { render(); } catch(e) { dlog('startTracking: render error: ' + e.message); }
 
   try { computeNextPasses(); } catch(e) { dlog('startTracking: computeNextPasses error: ' + e.message); }
+
+  // CAL button: recalibrate compass offset from the latest raw magnetometer reading
+  document.getElementById('calBtn').addEventListener('click', function() {
+    var btn = this;
+    if (_lastRawCompass !== null && _emaInited) {
+      // Compute the current alpha-based heading (without any offset)
+      var currentAlpha = deviceHeading - compassOffset;
+      var newOffset = _lastRawCompass - currentAlpha;
+      if (newOffset > 180) newOffset -= 360;
+      if (newOffset < -180) newOffset += 360;
+      compassOffset = newOffset;
+      // Re-seed EMA so the new absolute heading takes effect immediately
+      var newHeadRad = ((((currentAlpha + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
+      _emaHdgSin = Math.sin(newHeadRad);
+      _emaHdgCos = Math.cos(newHeadRad);
+      dlog('calBtn: reseeded compassOffset=' + compassOffset.toFixed(1));
+    }
+    // Flash the button to give tactile feedback
+    btn.classList.add('flash');
+    setTimeout(function() { btn.classList.remove('flash'); }, 600);
+  });
 
   setInterval(render, 1000);
   setInterval(updateTleFooter, 60000);
