@@ -423,6 +423,30 @@
   .sat-marker.linear { color: var(--linear); }
   .sat-marker.digi { color: var(--digi); }
 
+  /* ---- Orbit path (軌道弧) ---- */
+  .orbit-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .orbit-path {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.5;
+  }
+  .orbit-path-future {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 6 4;
+    opacity: 0.3;
+  }
+
   /* ---- Next-up banner (常時表示、コンパクト) ---- */
   .next-up-bar {
     position: absolute;
@@ -1347,6 +1371,46 @@ function computeSatPosition(sat, date) {
 // ============================================================
 // 次のパス予測（60秒ごとに計算）
 // ============================================================
+function computePassTrajectory(satrec, riseTime, setTime) {
+  // 30秒間隔で軌道点をサンプリング
+  var trajectory = [];
+  var stepMs = 30 * 1000;
+  var t0 = riseTime.getTime();
+  var t1 = setTime.getTime();
+  for (var t = t0; t <= t1; t += stepMs) {
+    var d = new Date(t);
+    try {
+      var pv = satellite.propagate(satrec, d);
+      if (!pv.position) continue;
+      var gmst = satellite.gstime(d);
+      var ecf = satellite.eciToEcf(pv.position, gmst);
+      var look = satellite.ecfToLookAngles(observer, ecf);
+      trajectory.push({
+        time: t,
+        az: satellite.radiansToDegrees(look.azimuth),
+        el: satellite.radiansToDegrees(look.elevation)
+      });
+    } catch(e) {}
+  }
+  // 終端点を追加
+  if (trajectory.length > 0 && trajectory[trajectory.length - 1].time < t1) {
+    try {
+      var pv = satellite.propagate(satrec, setTime);
+      if (pv.position) {
+        var gmst = satellite.gstime(setTime);
+        var ecf = satellite.eciToEcf(pv.position, gmst);
+        var look = satellite.ecfToLookAngles(observer, ecf);
+        trajectory.push({
+          time: t1,
+          az: satellite.radiansToDegrees(look.azimuth),
+          el: satellite.radiansToDegrees(look.elevation)
+        });
+      }
+    } catch(e) {}
+  }
+  return trajectory;
+}
+
 function computeNextPasses() {
   if (!observer) return;
   var now = new Date();
@@ -1361,18 +1425,37 @@ function computeNextPasses() {
       var satrec = satellite.twoline2satrec(tleData.tle1, tleData.tle2);
       var currentPos = computeSatPosition(sat, now);
 
-      // 現在可視なら次パスは不要（現在のパス情報を記録）
+      // 現在可視: 現在のパスの軌道を計算
       if (currentPos && currentPos.elevation > 0) {
-        nextPassCache[sat.norad] = { riseTime: null, maxEl: currentPos.elevation, isNow: true, azAtRise: currentPos.azimuth };
+        // パスの開始と終了を前後にスキャンして探す
+        var riseT = now, setT = now;
+        // 過去方向にスキャン（最大20分）
+        for (var dt = stepMs; dt <= 20 * 60 * 1000; dt += stepMs) {
+          var d = new Date(now.getTime() - dt);
+          var pos = computeSatPosition(sat, d);
+          if (!pos || pos.elevation <= 0) { riseT = new Date(now.getTime() - dt + stepMs); break; }
+          riseT = d;
+        }
+        // 未来方向にスキャン（最大20分）
+        for (var dt = stepMs; dt <= 20 * 60 * 1000; dt += stepMs) {
+          var d = new Date(now.getTime() + dt);
+          var pos = computeSatPosition(sat, d);
+          if (!pos || pos.elevation <= 0) { setT = d; break; }
+          setT = d;
+        }
+        var trajectory = computePassTrajectory(satrec, riseT, setT);
+        nextPassCache[sat.norad] = {
+          riseTime: null, maxEl: currentPos.elevation, isNow: true,
+          azAtRise: currentPos.azimuth, trajectory: trajectory
+        };
         return;
       }
 
       // 未来方向にスキャンして次の仰角>0の時刻を探す
       var riseTime = null;
+      var setTime = null;
       var maxEl = 0;
       var azAtRise = 0;
-      var wasAbove = false;
-      var foundPass = false;
 
       for (var dt = stepMs; dt <= maxLookAhead; dt += stepMs) {
         var futureDate = new Date(now.getTime() + dt);
@@ -1393,17 +1476,19 @@ function computeNextPasses() {
           maxEl = el;
         }
         if (riseTime && el <= 0) {
-          foundPass = true;
+          setTime = futureDate;
           break; // パス完了
         }
       }
 
       if (riseTime) {
+        var trajectory = setTime ? computePassTrajectory(satrec, riseTime, setTime) : [];
         nextPassCache[sat.norad] = {
           riseTime: riseTime,
           maxEl: Math.round(maxEl),
           azAtRise: Math.round(azAtRise),
-          isNow: false
+          isNow: false,
+          trajectory: trajectory
         };
       } else {
         nextPassCache[sat.norad] = null;
@@ -1566,6 +1651,15 @@ function render() {
     });
   }
 
+  // ---- 軌道弧の描画（マーカーの下に描画するため先に処理） ----
+  satData.forEach(function(item) {
+    var visible = item.pos.elevation > 0;
+    var tracked = isSatTracked(item.sat.norad);
+    if ((visible || tracked) && item.pass && item.pass.trajectory) {
+      drawOrbitPath(item.sat, item.pass.trajectory);
+    }
+  });
+
   // ---- AR マーカー + エッジインジケータ ----
   satData.forEach(function(item) {
     var sat = item.sat;
@@ -1613,6 +1707,100 @@ function placeSatMarker(sat, pos) {
     '</div>';
   document.getElementById('markerLayer').appendChild(marker);
   return true;
+}
+
+function drawOrbitPath(sat, trajectory) {
+  if (!trajectory || trajectory.length < 2) return;
+
+  var screenW = window.innerWidth;
+  var screenH = window.innerHeight;
+  var halfFovH = cameraFOV / 2;
+  var halfFovV = (cameraFOV * screenH / screenW) / 2;
+  var nowMs = Date.now();
+  var dotColor = getSatColor(sat.type);
+
+  // 軌道点をスクリーン座標に変換
+  var points = [];
+  for (var i = 0; i < trajectory.length; i++) {
+    var pt = trajectory[i];
+    var azDiff = pt.az - deviceHeading;
+    while (azDiff > 180) azDiff -= 360;
+    while (azDiff < -180) azDiff += 360;
+    var elDiff = pt.el - deviceElevation;
+    points.push({
+      x: screenW / 2 + (azDiff / halfFovH) * (screenW / 2),
+      y: screenH / 2 - (elDiff / halfFovV) * (screenH / 2),
+      time: pt.time
+    });
+  }
+
+  // 画面内に1点でもあるか確認（マージン付き）
+  var margin = 60;
+  var anyVisible = false;
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].x > -margin && points[i].x < screenW + margin &&
+        points[i].y > -margin && points[i].y < screenH + margin) {
+      anyVisible = true;
+      break;
+    }
+  }
+  if (!anyVisible) return;
+
+  // SVG要素を作成
+  var svgNs = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(svgNs, 'svg');
+  svg.setAttribute('class', 'orbit-svg');
+  svg.setAttribute('viewBox', '0 0 ' + screenW + ' ' + screenH);
+
+  // 過去の軌道（実線）と未来の軌道（破線）を分離
+  var pastPts = [];
+  var futurePts = [];
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].time <= nowMs) {
+      pastPts.push(points[i]);
+    } else {
+      if (pastPts.length > 0 && futurePts.length === 0) {
+        futurePts.push(pastPts[pastPts.length - 1]); // 接続点
+      }
+      futurePts.push(points[i]);
+    }
+  }
+
+  // パス描画ヘルパー
+  function buildPath(pts) {
+    if (pts.length < 2) return '';
+    var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+    for (var i = 1; i < pts.length; i++) {
+      d += 'L' + pts[i].x.toFixed(1) + ',' + pts[i].y.toFixed(1);
+    }
+    return d;
+  }
+
+  // CSSカスタムプロパティを実際の色に変換
+  var colorMap = {
+    'var(--iss)': '#ff6b47',
+    'var(--fm-sat)': '#4fb3d9',
+    'var(--linear)': '#b88ce8',
+    'var(--digi)': '#9be892'
+  };
+  var strokeColor = colorMap[dotColor] || '#FFFFFF';
+
+  if (pastPts.length >= 2) {
+    var path = document.createElementNS(svgNs, 'path');
+    path.setAttribute('d', buildPath(pastPts));
+    path.setAttribute('class', 'orbit-path');
+    path.setAttribute('stroke', strokeColor);
+    svg.appendChild(path);
+  }
+  if (futurePts.length >= 2) {
+    var path = document.createElementNS(svgNs, 'path');
+    path.setAttribute('d', buildPath(futurePts));
+    path.setAttribute('class', 'orbit-path-future');
+    path.setAttribute('stroke', strokeColor);
+    svg.appendChild(path);
+  }
+
+  document.getElementById('markerLayer').appendChild(svg);
 }
 
 var edgeSlotIndex = 0; // reset each render frame
