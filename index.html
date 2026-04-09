@@ -264,6 +264,60 @@
   .cal-btn.flash { color: var(--accent); border-color: var(--accent); }
   .cal-btn.init  { color: var(--accent); border-color: var(--accent); animation: calBlink 0.7s step-end infinite; }
   @keyframes calBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* ---- 初期補正中オーバーレイ ---- */
+  #initOverlay {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #initOverlay.active {
+    display: flex;
+  }
+  .init-banner {
+    background: rgba(10, 14, 24, 0.88); /* --glass より少し不透明にしてオーバーレイを目立たせる */
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1.5px solid var(--accent);
+    border-radius: 4px;
+    padding: 20px 28px;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    max-width: 300px;
+    animation: initPulse 2s ease-in-out infinite;
+  }
+  @keyframes initPulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(244, 197, 107, 0.25); }
+    50%       { box-shadow: 0 0 22px rgba(244, 197, 107, 0.55); }
+  }
+  .init-spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(244, 197, 107, 0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .init-title {
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .init-guide {
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 0.05em;
+    line-height: 1.7;
+  }
   .hud-compass .big {
     font-size: 22px;
     color: var(--accent);
@@ -924,6 +978,14 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
 
     <div id="markerLayer"></div>
 
+    <div id="initOverlay">
+      <div class="init-banner">
+        <div class="init-spinner"></div>
+        <div class="init-title">コンパス初期補正中…</div>
+        <div class="init-guide">端末を水平に持ち、<br>ゆっくり一回転させてください</div>
+      </div>
+    </div>
+
     <div class="next-up-bar" id="nextUpBar">
       <div class="next-up-content">
         <div class="next-sat-info" id="nextUpInfo">--</div>
@@ -1217,6 +1279,16 @@ var HEADING_RATE_EMA_NEW_WEIGHT = 0.18;
 var SAT_MOTION_RATE_EMA_OLD_WEIGHT = 0.75;
 var SAT_MOTION_RATE_EMA_NEW_WEIGHT = 0.25;
 var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
+// エッジ/ガイドインジケータの縦方向レイアウト定数
+// 可視衛星は画面上半分、非可視衛星は下半分に配置して一目で判別できるようにする
+var EDGE_VIS_Y_START_PX   = 160;    // 可視衛星エッジインジケータの開始Y座標(px)
+var EDGE_VIS_MAX_Y_PX     = 180;    // 可視衛星エッジが画面下端からこの距離内に入ったら折り返す
+var EDGE_BELOW_Y_RATIO    = 0.58;   // 非可視衛星エッジの開始Y比率（画面高さの58%）
+var EDGE_BELOW_MAX_Y_PX   = 100;    // 非可視衛星エッジが画面下端からこの距離内に入ったら折り返す
+var GUIDE_VIS_Y_RATIO     = 0.30;   // 可視衛星ガイドの開始Y比率（画面高さの30%）
+var GUIDE_BELOW_Y_RATIO   = 0.58;   // 非可視衛星ガイドの開始Y比率（画面高さの58%）
+var INDICATOR_SLOT_HEIGHT_PX = 55;  // インジケータ間の縦スロット幅(px)
+var INDICATOR_MAX_SLOTS   = 3;      // 折り返し前の最大スロット数
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
 // to convert the relative alpha into an absolute (true-north) heading.
@@ -2352,7 +2424,8 @@ function positionMarkersAndEdges() {
   var halfFovH = cameraFOV / 2;
   var halfFovV = (cameraFOV * screenH / screenW) / 2;
   var nowMs = Date.now();
-  var slotIndex = 0;
+  var visSlotIndex = 0;    // 可視衛星（地平線上）のスロット番号
+  var belowSlotIndex = 0;  // 非可視衛星（地平線下）のスロット番号
 
   satDataCache.forEach(function(item) {
     var sat = item.sat;
@@ -2422,7 +2495,10 @@ function positionMarkersAndEdges() {
           }
           elems.guide.style.display = '';
           elems.guide.style.left = xPercent + '%';
-          elems.guide.style.top = (screenH * 0.35 + slotIndex * 55) + 'px';
+          // 可視衛星は画面上半分、非可視衛星は下半分に配置してパッと区別できるようにする
+          elems.guide.style.top = visible
+            ? (screenH * GUIDE_VIS_Y_RATIO   + visSlotIndex   * INDICATOR_SLOT_HEIGHT_PX) + 'px'
+            : (screenH * GUIDE_BELOW_Y_RATIO + belowSlotIndex * INDICATOR_SLOT_HEIGHT_PX) + 'px';
           elems.guide.innerHTML =
             '<div class="guide-arrow">' + arrowSymbol + '</div>' +
             '<div class="guide-name">' + sat.displayName + '</div>' +
@@ -2431,8 +2507,15 @@ function positionMarkersAndEdges() {
         } else {
           // 方位がずれている → 画面端にエッジインジケータ
           var arrow = edgeAzDiff < 0 ? '\u25C0' : '\u25B6';
-          var yBase = 160 + slotIndex * 55;
-          if (yBase > screenH - 180) yBase = 160 + (slotIndex % 3) * 55;
+          // 可視衛星は上半分、非可視衛星は下半分に配置してひと目で分かるようにする
+          var yBase;
+          if (visible) {
+            yBase = EDGE_VIS_Y_START_PX + visSlotIndex * INDICATOR_SLOT_HEIGHT_PX;
+            if (yBase > screenH - EDGE_VIS_MAX_Y_PX) yBase = EDGE_VIS_Y_START_PX + (visSlotIndex % INDICATOR_MAX_SLOTS) * INDICATOR_SLOT_HEIGHT_PX;
+          } else {
+            yBase = Math.round(screenH * EDGE_BELOW_Y_RATIO) + belowSlotIndex * INDICATOR_SLOT_HEIGHT_PX;
+            if (yBase > screenH - EDGE_BELOW_MAX_Y_PX) yBase = Math.round(screenH * EDGE_BELOW_Y_RATIO) + (belowSlotIndex % INDICATOR_MAX_SLOTS) * INDICATOR_SLOT_HEIGHT_PX;
+          }
 
           var detailText = '';
           if (pass && pass.riseTime) {
@@ -2452,7 +2535,8 @@ function positionMarkersAndEdges() {
           elems.edge.innerHTML = '<span class="arrow">' + arrow + '</span><div>' + sat.displayName + detailText + '</div>';
           elems.guide.style.display = 'none';
         }
-        slotIndex++;
+        if (visible) visSlotIndex++;
+        else belowSlotIndex++;
       } else {
         elems.edge.style.display = 'none';
         elems.guide.style.display = 'none';
@@ -2539,10 +2623,13 @@ function updateOrientationDisplay() {
 
   // Show init indicator on CAL button while collecting compass samples
   var calBtn = document.getElementById('calBtn');
+  var initOverlay = document.getElementById('initOverlay');
   if (_initPhase === 'collecting') {
     calBtn.classList.add('init');
+    if (initOverlay) initOverlay.classList.add('active');
   } else {
     calBtn.classList.remove('init');
+    if (initOverlay) initOverlay.classList.remove('active');
   }
 
   var tickWidth = 24;
