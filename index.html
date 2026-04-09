@@ -926,7 +926,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
       <div class="pass-forecast-panel">
         <div class="pass-forecast-header">
           <span class="pass-forecast-title">7-Day Pass Forecast</span>
-          <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite"></select>
+          <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite" lang="ja"></select>
         </div>
         <div class="pass-forecast-wrap">
           <table class="pass-forecast-table" lang="ja" aria-label="7日間の衛星パス予報表">
@@ -1627,6 +1627,7 @@ function computeWeeklyPassesForSatellite(norad) {
       if (prevEl > 0 && el <= 0) {
         var setMs = refineHorizonCrossingTime(satrec, t - stepMs, t);
         var setLook = computeLookAnglesFromSatrec(satrec, new Date(setMs));
+        // Round to whole minutes for table readability; clamp to 1 minute minimum.
         var durationMin = Math.max(1, Math.round((setMs - activePass.riseTimeMs) / MS_PER_MINUTE));
         passes.push({
           riseTime: new Date(activePass.riseTimeMs),
@@ -1727,9 +1728,13 @@ function initPassForecastPanel() {
   var select = document.getElementById('forecastSatSelect');
   if (!select) return;
 
-  select.innerHTML = TRACKED_SATS.map(function(sat) {
-    return '<option value="' + sat.norad + '">' + sat.displayName + '</option>';
-  }).join('');
+  select.textContent = '';
+  TRACKED_SATS.forEach(function(sat) {
+    var option = document.createElement('option');
+    option.value = String(sat.norad);
+    option.textContent = sat.displayName;
+    select.appendChild(option);
+  });
   select.value = String(selectedForecastNorad);
 
   select.addEventListener('change', function() {
