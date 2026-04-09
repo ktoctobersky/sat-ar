@@ -828,7 +828,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
         <div class="big" id="headingBig">---&deg;</div>
         <div class="label" id="headingCard">---</div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);opacity:0.7;margin-top:2px" id="elevationLabel">EL ---°</div>
-        <button class="cal-btn" id="calBtn">CAL</button>
+        <button class="cal-btn" id="calBtn" aria-label="Recalibrate compass heading">CAL</button>
       </div>
     </div>
 
@@ -1360,7 +1360,7 @@ function startTracking() {
       if (newOffset < -180) newOffset += 360;
       compassOffset = newOffset;
       // Re-seed EMA so the new absolute heading takes effect immediately
-      var newHeadRad = (((currentAlpha + compassOffset) % 360) + 360) % 360 * Math.PI / 180;
+      var newHeadRad = ((((currentAlpha + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
       _emaHdgSin = Math.sin(newHeadRad);
       _emaHdgCos = Math.cos(newHeadRad);
       dlog('calBtn: reseeded compassOffset=' + compassOffset.toFixed(1));
