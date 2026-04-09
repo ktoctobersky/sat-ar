@@ -1104,9 +1104,16 @@ document.getElementById('startBtn').addEventListener('click', function() {
     dlog('startBtn: permission results orientation=' + orientState + ' motion=' + motionState);
 
     if (orientState === 'granted' || orientState === 'not-needed') {
-      window.addEventListener('deviceorientation', handleOrientation, true);
+      // Prefer deviceorientationabsolute (true-North heading on Android).
+      // iOS gives absolute heading via webkitCompassHeading on the standard event,
+      // so do NOT also register deviceorientation when absolute is available —
+      // that would double-fire handleOrientation and corrupt the ring buffer.
       if ('ondeviceorientationabsolute' in window) {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+        dlog('startBtn: using deviceorientationabsolute');
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation, true);
+        dlog('startBtn: using deviceorientation (fallback)');
       }
     }
     // DeviceMotion permission kept for future use but no listener needed —
