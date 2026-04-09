@@ -1042,28 +1042,23 @@ function updateTleStatus(state, msg) {
 var observer = null;
 var observerLabel = '---';
 var deviceHeading = 0;
-var devicePitch = 0;
 var deviceElevation = 0;
-var deviceRoll = 0;
 
-// Sensor fusion state
-var smoothHeadingSin = 0;
-var smoothHeadingCos = 1;
-var smoothPitchSin = 0;
-var smoothPitchCos = 1;
-var smoothElevation = 0;
-var smoothRoll = 0;
-var sensorInitialized = false;
+// Sensor ring buffer for stable heading/elevation (replaces EMA)
+// 30 samples at ~60Hz ≈ 0.5 second averaging window
+var SENSOR_WINDOW = 30;
+var _hdgSinBuf = new Array(SENSOR_WINDOW).fill(0);
+var _hdgCosBuf = new Array(SENSOR_WINDOW).fill(1);  // cos(0°)=1 as identity
+var _elevBuf   = new Array(SENSOR_WINDOW).fill(0);
+var _sensorPtr   = 0;  // write pointer
+var _sensorCount = 0;  // samples collected (capped at SENSOR_WINDOW)
+var _hdgSinSum = 0;
+var _hdgCosSum = SENSOR_WINDOW;  // matches initial buf fill (cos=1)
+var _elevSum   = 0;
 // Heading: OS-fused alpha + compass offset for absolute calibration
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
 // Compass offset correction
 var COMPASS_OFFSET_K = 0.005;  // offset correction per event (~3s convergence at 60Hz)
-var HEADING_SMOOTH_K = 0.4;     // display smoothing (alpha is already OS-fused, light)
-// Pitch smoothing parameters
-var PITCH_K_MIN = 0.10;
-var PITCH_K_MAX = 0.6;
-var MOVE_THRESHOLD = 3;
-var MOVE_SCALE = 15;
 var satPositions = {};  // { norad: { azimuth, elevation, rangeKm } } - 1秒ごとに更新
 var satDataCache = [];  // sorted satData array - 1秒ごとに更新、rAFで参照
 var markerEls = {};     // { norad: { marker, edge, guide, svg, pastPath, futurePath } } - 永続DOM要素
@@ -1220,7 +1215,7 @@ function handleOrientation(e) {
   var heading;
   if (alphaHeading !== null && rawCompass !== null) {
     // iOS: alpha is relative → calibrate with compass offset
-    if (!sensorInitialized) {
+    if (_sensorCount === 0) {
       compassOffset = rawCompass - alphaHeading;
       if (compassOffset > 180) compassOffset -= 360;
       if (compassOffset < -180) compassOffset += 360;
@@ -1246,46 +1241,38 @@ function handleOrientation(e) {
   }
   heading = ((heading % 360) + 360) % 360;
 
-  // --- Elevation from rotation matrix ---
-  // (beta/gamma are OS-fused, continuous at beta=±180°, accounts for roll)
+  // --- Compass offset calibration (absolute heading from OS-fused alpha) ---
+  var headRad = heading * Math.PI / 180;
+  var rawSin = Math.sin(headRad);
+  var rawCos = Math.cos(headRad);
   var pRad = pitch * Math.PI / 180;
   var rRad = roll * Math.PI / 180;
   var rawElevation = Math.asin(Math.max(-1, Math.min(1, -Math.cos(pRad) * Math.cos(rRad)))) * 180 / Math.PI;
 
-  // --- Smoothing ---
-  // Alpha is already OS-fused so only light display smoothing needed.
-  var headRad = heading * Math.PI / 180;
-  var rawSin = Math.sin(headRad);
-  var rawCos = Math.cos(headRad);
+  // --- Ring buffer update ---
+  // Subtract the oldest sample from running sums
+  _hdgSinSum -= _hdgSinBuf[_sensorPtr];
+  _hdgCosSum -= _hdgCosBuf[_sensorPtr];
+  _elevSum   -= _elevBuf[_sensorPtr];
+  // Write new sample
+  _hdgSinBuf[_sensorPtr] = rawSin;
+  _hdgCosBuf[_sensorPtr] = rawCos;
+  _elevBuf[_sensorPtr]   = rawElevation;
+  // Advance pointer
+  _sensorPtr = (_sensorPtr + 1) % SENSOR_WINDOW;
+  if (_sensorCount < SENSOR_WINDOW) _sensorCount++;
+  // Add new sample to running sums
+  _hdgSinSum += rawSin;
+  _hdgCosSum += rawCos;
+  _elevSum   += rawElevation;
 
-  if (!sensorInitialized) {
-    smoothHeadingSin = rawSin;
-    smoothHeadingCos = rawCos;
-    smoothPitchSin = Math.sin(pRad);
-    smoothPitchCos = Math.cos(pRad);
-    smoothElevation = rawElevation;
-    smoothRoll = roll;
-    sensorInitialized = true;
-  } else {
-    var elevDelta = Math.abs(rawElevation - smoothElevation);
-    var pitchK = PITCH_K_MIN + (PITCH_K_MAX - PITCH_K_MIN) *
-      Math.min(1, Math.max(0, (elevDelta - MOVE_THRESHOLD) / MOVE_SCALE));
-
-    smoothHeadingSin += HEADING_SMOOTH_K * (rawSin - smoothHeadingSin);
-    smoothHeadingCos += HEADING_SMOOTH_K * (rawCos - smoothHeadingCos);
-    smoothPitchSin += pitchK * (Math.sin(pRad) - smoothPitchSin);
-    smoothPitchCos += pitchK * (Math.cos(pRad) - smoothPitchCos);
-    smoothElevation += pitchK * (rawElevation - smoothElevation);
-    smoothRoll += pitchK * (roll - smoothRoll);
-  }
-
-  var smoothedHeading = Math.atan2(smoothHeadingSin, smoothHeadingCos) * 180 / Math.PI;
+  // Compute window mean
+  var n = _sensorCount;
+  var smoothedHeading = Math.atan2(_hdgSinSum / n, _hdgCosSum / n) * 180 / Math.PI;
   if (smoothedHeading < 0) smoothedHeading += 360;
 
-  deviceHeading = smoothedHeading;
-  devicePitch = Math.atan2(smoothPitchSin, smoothPitchCos) * 180 / Math.PI;
-  deviceElevation = smoothElevation;
-  deviceRoll = smoothRoll;
+  deviceHeading   = smoothedHeading;
+  deviceElevation = _elevSum / n;
 }
 
 async function requestCamera() {
@@ -1925,6 +1912,9 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
   elems.futurePath.setAttribute('d', buildSvgPathD(futurePts));
 }
 
+var _lastMarkerUpdateMs = 0;
+var MARKER_UPDATE_INTERVAL_MS = 100;  // marker position update rate: ~10fps
+
 function updateOrientationDisplay() {
   var headingBig = document.getElementById('headingBig');
   var headingCard = document.getElementById('headingCard');
@@ -1941,7 +1931,12 @@ function updateOrientationDisplay() {
   var offset = barCenterOffset - (deviceHeading * tickWidth / 10) - tickWidth / 2;
   compassBar.style.transform = 'translateX(' + offset + 'px)';
 
-  positionMarkersAndEdges();  // センサー更新に合わせてマーカー位置を毎フレーム更新
+  // マーカー位置は10fpsに制限（センサー平均が安定しているためそれ以上は不要）
+  var now = performance.now();
+  if (now - _lastMarkerUpdateMs >= MARKER_UPDATE_INTERVAL_MS) {
+    _lastMarkerUpdateMs = now;
+    positionMarkersAndEdges();
+  }
 
   if (isRunning) requestAnimationFrame(updateOrientationDisplay);
 }
