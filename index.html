@@ -433,18 +433,18 @@
   }
   .orbit-path {
     fill: none;
-    stroke-width: 1.5;
+    stroke-width: 3;
     stroke-linecap: round;
     stroke-linejoin: round;
-    opacity: 0.5;
+    opacity: 0.6;
   }
   .orbit-path-future {
     fill: none;
-    stroke-width: 1.5;
+    stroke-width: 3;
     stroke-linecap: round;
     stroke-linejoin: round;
-    stroke-dasharray: 6 4;
-    opacity: 0.3;
+    stroke-dasharray: 8 5;
+    opacity: 0.35;
   }
 
   /* ---- Next-up banner (常時表示、コンパクト) ---- */
@@ -1052,12 +1052,11 @@ var smoothPitchCos = 1;
 var smoothElevation = 0;
 var smoothRoll = 0;
 var sensorInitialized = false;
-// Gyroscope-primary heading with complementary filter
-var gyroHeading = 0;            // gyro-integrated absolute heading (degrees)
-var lastGyroTime = 0;
-// Complementary filter: compass corrects gyro drift
-var COMPASS_CORRECTION_K = 0.005; // correction per orientation event (~3s convergence at 60Hz)
-var HEADING_SMOOTH_K = 0.3;     // display smoothing (gyro is inherently smooth)
+// Heading: OS-fused alpha + compass offset for absolute calibration
+var compassOffset = 0;          // converts OS-fused alpha to absolute heading
+// Compass offset correction
+var COMPASS_OFFSET_K = 0.005;  // offset correction per event (~3s convergence at 60Hz)
+var HEADING_SMOOTH_K = 0.4;     // display smoothing (alpha is already OS-fused, light)
 // Pitch smoothing parameters
 var PITCH_K_MIN = 0.10;
 var PITCH_K_MAX = 0.6;
@@ -1110,18 +1109,16 @@ document.getElementById('startBtn').addEventListener('click', function() {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
       }
     }
-    if (motionState === 'granted' || motionState === 'not-needed') {
-      window.addEventListener('devicemotion', handleGyro, true);
-    }
+    // DeviceMotion permission kept for future use but no listener needed —
+    // iOS's deviceorientation already provides OS-fused gyro+accel+mag data.
 
-    if (orientState === 'denied' && motionState === 'denied') {
+    if (orientState === 'denied') {
       dlog('startBtn: both permissions denied (continuing anyway)');
     }
     return continueStartup();
   }).catch(function(err) {
     dlog('startBtn: permission error: ' + (err.message || err) + ' (continuing anyway)');
     window.addEventListener('deviceorientation', handleOrientation, true);
-    window.addEventListener('devicemotion', handleGyro, true);
     return continueStartup();
   });
 
@@ -1192,67 +1189,66 @@ function requestGeolocation() {
   });
 }
 
-// Note: orientation permission is now handled directly in the click handler
-// to preserve user gesture context on iOS Safari.
-
-// Gyroscope handler: integrate rotation rate for continuous heading tracking
-function handleGyro(e) {
-  if (!e.rotationRate) return;
-  var now = performance.now();
-  var dt = lastGyroTime ? (now - lastGyroTime) / 1000 : 0;
-  lastGyroTime = now;
-  if (dt <= 0 || dt > 0.2) return; // skip stale or first reading
-
-  // Recover world-yaw rate from device rotation rates.
-  // World vertical projects onto device Z by cos(pitch), onto Y by sin(pitch).
-  var pitchRad = devicePitch * Math.PI / 180;
-  var yawRate = (e.rotationRate.alpha || 0) * Math.cos(pitchRad)
-              + (e.rotationRate.gamma || 0) * Math.sin(pitchRad);
-  // webkitCompassHeading is CW from north; rotationRate.alpha positive = CCW
-  gyroHeading -= yawRate * dt;
-  gyroHeading = ((gyroHeading % 360) + 360) % 360;
-}
-
+// Orientation handler: uses OS-fused alpha/beta/gamma directly.
+// iOS's deviceorientation already combines gyro+accel+mag internally —
+// manual gyro integration would fight the OS fusion and cause jitter.
 function handleOrientation(e) {
-  var compassHeading = 0;
-  if (typeof e.webkitCompassHeading === 'number') {
-    compassHeading = e.webkitCompassHeading;
-  } else if (e.absolute && typeof e.alpha === 'number') {
-    compassHeading = 360 - e.alpha;
-  } else if (typeof e.alpha === 'number') {
-    compassHeading = 360 - e.alpha;
-  }
   var pitch = e.beta || 0;
   var roll = e.gamma || 0;
-  var compassAccuracy = e.webkitCompassAccuracy || 999; // P0: iOS quality signal
+  var compassAccuracy = e.webkitCompassAccuracy || 999;
 
-  // Camera elevation from rotation matrix (continuous at beta=±180°, accounts for roll)
-  // R = Rz(α)·Rx(β)·Ry(γ), camera = −Z axis → elevation = asin(−cos β · cos γ)
+  // --- Heading ---
+  // iOS: alpha is OS-fused (smooth, responsive) but relative to initial direction.
+  //      webkitCompassHeading is raw magnetometer (absolute but noisy).
+  //      Strategy: use alpha for smooth tracking, compass to calibrate absolute offset.
+  // Android: alpha is absolute when e.absolute === true; use directly.
+  var alphaHeading = null; // OS-fused heading (CW, relative or absolute)
+  var rawCompass = null;   // raw magnetometer heading (CW from north)
+
+  if (typeof e.alpha === 'number') {
+    alphaHeading = (360 - e.alpha) % 360; // convert CCW alpha to CW heading
+  }
+  if (typeof e.webkitCompassHeading === 'number') {
+    rawCompass = e.webkitCompassHeading; // iOS only, absolute from magnetometer
+  }
+
+  var heading;
+  if (alphaHeading !== null && rawCompass !== null) {
+    // iOS: alpha is relative → calibrate with compass offset
+    if (!sensorInitialized) {
+      compassOffset = rawCompass - alphaHeading;
+      if (compassOffset > 180) compassOffset -= 360;
+      if (compassOffset < -180) compassOffset += 360;
+    } else if (compassAccuracy < 50) {
+      // Slowly update offset to track magnetic drift
+      var expectedOffset = rawCompass - alphaHeading;
+      var offsetDiff = expectedOffset - compassOffset;
+      if (offsetDiff > 180) offsetDiff -= 360;
+      if (offsetDiff < -180) offsetDiff += 360;
+      var corrK = compassAccuracy > 25 ? COMPASS_OFFSET_K * 0.3 : COMPASS_OFFSET_K;
+      compassOffset += offsetDiff * corrK;
+    }
+    heading = alphaHeading + compassOffset;
+  } else if (e.absolute && alphaHeading !== null) {
+    // Android absolute: alpha IS the compass heading
+    heading = alphaHeading;
+  } else if (rawCompass !== null) {
+    heading = rawCompass;
+  } else if (alphaHeading !== null) {
+    heading = alphaHeading;
+  } else {
+    heading = 0;
+  }
+  heading = ((heading % 360) + 360) % 360;
+
+  // --- Elevation from rotation matrix ---
+  // (beta/gamma are OS-fused, continuous at beta=±180°, accounts for roll)
   var pRad = pitch * Math.PI / 180;
   var rRad = roll * Math.PI / 180;
   var rawElevation = Math.asin(Math.max(-1, Math.min(1, -Math.cos(pRad) * Math.cos(rRad)))) * 180 / Math.PI;
-  var deviceEl = rawElevation;
 
-  // Initialize gyro heading from first compass reading
-  if (!sensorInitialized) {
-    gyroHeading = compassHeading;
-  }
-
-  // Complementary filter: compass gently corrects gyro drift
-  // Gyro provides responsive short-term tracking; compass prevents long-term drift
-  if (sensorInitialized && compassAccuracy < 50) {
-    var compassDiff = compassHeading - gyroHeading;
-    if (compassDiff > 180) compassDiff -= 360;
-    if (compassDiff < -180) compassDiff += 360;
-    // Weaken correction when compass accuracy is poor
-    var corrK = compassAccuracy > 25 ? COMPASS_CORRECTION_K * 0.3 : COMPASS_CORRECTION_K;
-    gyroHeading += compassDiff * corrK;
-    gyroHeading = ((gyroHeading % 360) + 360) % 360;
-  }
-
-  var heading = gyroHeading;
-
-  // Low-pass filter
+  // --- Smoothing ---
+  // Alpha is already OS-fused so only light display smoothing needed.
   var headRad = heading * Math.PI / 180;
   var rawSin = Math.sin(headRad);
   var rawCos = Math.cos(headRad);
@@ -1270,7 +1266,6 @@ function handleOrientation(e) {
     var pitchK = PITCH_K_MIN + (PITCH_K_MAX - PITCH_K_MIN) *
       Math.min(1, Math.max(0, (elevDelta - MOVE_THRESHOLD) / MOVE_SCALE));
 
-    // Light heading smoothing — gyro is inherently smooth, no adaptive k needed
     smoothHeadingSin += HEADING_SMOOTH_K * (rawSin - smoothHeadingSin);
     smoothHeadingCos += HEADING_SMOOTH_K * (rawCos - smoothHeadingCos);
     smoothPitchSin += pitchK * (Math.sin(pRad) - smoothPitchSin);
