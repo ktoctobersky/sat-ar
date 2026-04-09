@@ -929,7 +929,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
           <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite"></select>
         </div>
         <div class="pass-forecast-wrap">
-          <table class="pass-forecast-table" lang="ja" aria-label="7-day satellite pass forecast table">
+          <table class="pass-forecast-table" lang="ja" aria-label="7日間の衛星パス予報表">
             <thead>
               <tr>
                 <th>日付</th>
@@ -1600,17 +1600,11 @@ function computeWeeklyPassesForSatellite(norad) {
   var passes = [];
 
   var prevTime = startDate.getTime();
-  var prevLook = computeLookAnglesFromSatrec(satrec, new Date(prevTime));
-  var prevEl = prevLook ? prevLook.elevation : -90;
+  var prevEl = (function() {
+    var lookAtStart = computeLookAnglesFromSatrec(satrec, new Date(prevTime));
+    return lookAtStart ? lookAtStart.elevation : -90;
+  })();
   var activePass = null;
-
-  if (prevEl > 0) {
-    activePass = {
-      riseTimeMs: prevTime,
-      riseAz: prevLook.azimuth,
-      maxEl: prevEl
-    };
-  }
 
   for (var t = prevTime + stepMs; t <= endDate.getTime(); t += stepMs) {
     var look = computeLookAnglesFromSatrec(satrec, new Date(t));
