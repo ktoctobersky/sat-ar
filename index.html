@@ -1203,7 +1203,7 @@ var _satMotionRateDegPerSec = 0;
 var _lastSatMotionSampleTs = 0;
 var _satMotionSamples = {};          // { norad: { azimuth, elevation } }
 var _lastMarkerUpdateTs = 0;
-var _markerUpdateIntervalMs = 120;   // 初期は約8fps相当、速度サンプル取得後に動的更新
+var _markerUpdateIntervalMs = 120;   // 初期は約8fps相当、速度サンプル取得後に動的に更新
 var MARKER_UPDATE_INTERVAL_MIN_MS = 70;
 var MARKER_UPDATE_INTERVAL_MAX_MS = 220;
 var MARKER_TARGET_ANGLE_DEG = 1.2;   // マーカー更新間で許容する角度変化量
@@ -1495,7 +1495,9 @@ function updateAdaptiveMarkerInterval(nowMs) {
     _satMotionRateDegPerSec,
     Math.min(_headingRateDegPerSec, MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC)
   );
-  if (!isFinite(activeRate) || activeRate <= 0) activeRate = MIN_ACTIVE_RATE_DEG_PER_SEC;
+  if (!isFinite(activeRate) || activeRate < MIN_ACTIVE_RATE_DEG_PER_SEC) {
+    activeRate = MIN_ACTIVE_RATE_DEG_PER_SEC;
+  }
   var nextInterval = (MARKER_TARGET_ANGLE_DEG / activeRate) * 1000;
   if (nextInterval < MARKER_UPDATE_INTERVAL_MIN_MS) nextInterval = MARKER_UPDATE_INTERVAL_MIN_MS;
   if (nextInterval > MARKER_UPDATE_INTERVAL_MAX_MS) nextInterval = MARKER_UPDATE_INTERVAL_MAX_MS;
@@ -2208,7 +2210,15 @@ function updateSatMotionRate(now, satData) {
   }
 
   var dtSec = (nowMs - _lastSatMotionSampleTs) / 1000;
-  if (!isFinite(dtSec) || dtSec <= 0) return;
+  if (!isFinite(dtSec) || dtSec <= 0) {
+    satData.forEach(function(item) {
+      _satMotionSamples[item.sat.norad] = {
+        azimuth: item.pos.azimuth,
+        elevation: item.pos.elevation
+      };
+    });
+    return;
+  }
   _lastSatMotionSampleTs = nowMs;
 
   var maxRate = 0;
