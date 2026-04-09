@@ -22,6 +22,7 @@
     --linear: #b88ce8;
     --digi: #9be892;
     --good-pass: #ffd84d;
+    --good-pass-shadow: rgba(255, 216, 77, 0.35);
     --glass: rgba(10, 14, 24, 0.78);
     --grid: rgba(245, 241, 230, 0.14);
   }
@@ -473,7 +474,7 @@
   .max-el.good-pass {
     color: var(--good-pass);
     font-weight: 700;
-    text-shadow: 0 0 6px rgba(255, 216, 77, 0.35);
+    text-shadow: 0 0 6px var(--good-pass-shadow);
   }
 
   /* ---- Next-up banner (常時表示、コンパクト) ---- */
@@ -1398,7 +1399,7 @@ function handleOrientation(e) {
       if (compassOffset < -180) compassOffset += 360;
     } else {
       if (_lastAlphaHeading !== null) {
-        alphaRateDegPerSec = Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
+        alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
       }
       var predicted = ((alphaHeading + compassOffset) % 360 + 360) % 360;
       var residual = normalizeAzDiff(rawCompass - predicted);
@@ -1420,7 +1421,7 @@ function handleOrientation(e) {
     // Android absolute: alpha IS the compass heading
     heading = alphaHeading;
     if (_lastAlphaHeading !== null) {
-      alphaRateDegPerSec = Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
+      alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
     }
     _lastAlphaHeading = alphaHeading;
     _lastAlphaUpdatedTs = Date.now();
@@ -1429,7 +1430,7 @@ function handleOrientation(e) {
   } else if (alphaHeading !== null) {
     heading = alphaHeading;
     if (_lastAlphaHeading !== null) {
-      alphaRateDegPerSec = Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
+      alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
     }
     _lastAlphaHeading = alphaHeading;
     _lastAlphaUpdatedTs = Date.now();
@@ -1476,7 +1477,7 @@ function getRobustHeadingFromWindow(heading) {
   if (_headingWindow.length > HEADING_WINDOW_SIZE) _headingWindow.shift();
   if (_headingWindow.length < 3) return heading;
 
-  var anchor = _hasOutputHeading ? _lastOutputHeading : heading;
+  var anchor = _headingWindow[_headingWindow.length - 1];
   var diffs = _headingWindow.map(function(h) {
     return normalizeAzDiff(h - anchor);
   }).sort(function(a, b) { return a - b; });
@@ -1490,6 +1491,11 @@ function getRobustHeadingFromWindow(heading) {
   }
   if (count === 0) return anchor;
   return ((anchor + (sum / count)) % 360 + 360) % 360;
+}
+
+function computeAlphaRate(alphaHeading, dtSec) {
+  if (_lastAlphaHeading === null || !(dtSec > 0)) return 0;
+  return Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
 }
 
 function applyHeadingRateLimit(targetHeading, dtSec) {
@@ -1593,13 +1599,13 @@ function startTracking() {
     if (_lastRawCompass !== null && _emaInited && _lastAlphaHeading !== null &&
         (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
       // Compute the current alpha-based heading (without any offset)
-      var currentAlpha = _lastAlphaHeading;
-      var newOffset = _lastRawCompass - currentAlpha;
+      var alphaHeadingForCal = _lastAlphaHeading;
+      var newOffset = _lastRawCompass - alphaHeadingForCal;
       if (newOffset > 180) newOffset -= 360;
       if (newOffset < -180) newOffset += 360;
       compassOffset = newOffset;
       // Re-seed EMA so the new absolute heading takes effect immediately
-      var newHeadRad = ((((currentAlpha + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
+      var newHeadRad = ((((alphaHeadingForCal + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
       _emaHdgSin = Math.sin(newHeadRad);
       _emaHdgCos = Math.cos(newHeadRad);
       _snappedHeading = null;
