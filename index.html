@@ -1045,15 +1045,15 @@ var deviceHeading = 0;
 var deviceElevation = 0;
 
 // Sensor ring buffer for stable heading/elevation (replaces EMA)
-// 30 samples at ~60Hz ≈ 0.5 second averaging window
-var SENSOR_WINDOW = 30;
+// 15 samples at ~60Hz ≈ 0.25 second averaging window (less lag than 30)
+var SENSOR_WINDOW = 15;
 var _hdgSinBuf = new Array(SENSOR_WINDOW).fill(0);
-var _hdgCosBuf = new Array(SENSOR_WINDOW).fill(1);  // cos(0°)=1 as identity
+var _hdgCosBuf = new Array(SENSOR_WINDOW).fill(1);
 var _elevBuf   = new Array(SENSOR_WINDOW).fill(0);
 var _sensorPtr   = 0;  // write pointer
 var _sensorCount = 0;  // samples collected (capped at SENSOR_WINDOW)
 var _hdgSinSum = 0;
-var _hdgCosSum = SENSOR_WINDOW;  // matches initial buf fill (cos=1)
+var _hdgCosSum = SENSOR_WINDOW;
 var _elevSum   = 0;
 // Heading: OS-fused alpha + compass offset for absolute calibration
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
@@ -1236,6 +1236,8 @@ function handleOrientation(e) {
       var offsetDiff = expectedOffset - compassOffset;
       if (offsetDiff > 180) offsetDiff -= 360;
       if (offsetDiff < -180) offsetDiff += 360;
+      // Clamp large corrections (magnetic interference near trains/buildings)
+      if (Math.abs(offsetDiff) > 30) offsetDiff = 0; // ignore wild compass jumps
       var corrK = compassAccuracy > 25 ? COMPASS_OFFSET_K * 0.3 : COMPASS_OFFSET_K;
       compassOffset += offsetDiff * corrK;
     }
@@ -1924,7 +1926,7 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
 }
 
 var _lastMarkerUpdateMs = 0;
-var MARKER_UPDATE_INTERVAL_MS = 1000;  // marker position update rate: 1fps
+var MARKER_UPDATE_INTERVAL_MS = 200;  // marker position update rate: 5fps (tracks heading smoothly)
 
 function updateOrientationDisplay() {
   var headingBig = document.getElementById('headingBig');
