@@ -929,7 +929,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
           <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite"></select>
         </div>
         <div class="pass-forecast-wrap">
-          <table class="pass-forecast-table">
+          <table class="pass-forecast-table" lang="ja">
             <thead>
               <tr>
                 <th>日付</th>
@@ -1178,6 +1178,11 @@ var drawerOpen = false;
 var autoTrackedIds = []; // auto-selected: next 2 upcoming sats
 var selectedForecastNorad = TRACKED_SATS[0].norad;
 var weeklyPassCache = {}; // { noradId: { windowStartMs, computedAtMs, passes } }
+var MS_PER_MINUTE = 60 * 1000;
+var FORECAST_CACHE_DURATION_MS = 10 * MS_PER_MINUTE;
+var FORECAST_RECALC_INTERVAL_MS = 10 * MS_PER_MINUTE;
+var PASS_DETECTION_STEP_MS = 30 * 1000;
+var HORIZON_CROSSING_ITERATIONS = 14; // 約2ms未満まで収束し、AOS/LOS判定に十分
 
 // ============================================================
 // スタート
@@ -1499,7 +1504,7 @@ function startTracking() {
       ensureWeeklyPassForecast(true);
       if (drawerOpen) renderPassForecastTable();
     } catch(e) {}
-  }, 10 * 60 * 1000);
+  }, FORECAST_RECALC_INTERVAL_MS);
   requestAnimationFrame(updateOrientationDisplay);
 }
 
@@ -1544,7 +1549,7 @@ function computeLookAnglesFromSatrec(satrec, date) {
 function refineHorizonCrossingTime(satrec, lowTimeMs, highTimeMs) {
   var low = lowTimeMs;
   var high = highTimeMs;
-  for (var i = 0; i < 14; i++) {
+  for (var i = 0; i < HORIZON_CROSSING_ITERATIONS; i++) {
     var mid = Math.floor((low + high) / 2);
     var look = computeLookAnglesFromSatrec(satrec, new Date(mid));
     var el = look ? look.elevation : -90;
@@ -1591,7 +1596,7 @@ function computeWeeklyPassesForSatellite(norad) {
   var now = new Date();
   var startDate = getTomorrowStart(now);
   var endDate = new Date(startDate.getTime() + 7 * 24 * 60 * 60 * 1000);
-  var stepMs = 30 * 1000;
+  var stepMs = PASS_DETECTION_STEP_MS;
   var passes = [];
 
   var prevTime = startDate.getTime();
@@ -1627,7 +1632,7 @@ function computeWeeklyPassesForSatellite(norad) {
       if (prevEl > 0 && el <= 0) {
         var setMs = refineHorizonCrossingTime(satrec, t - stepMs, t);
         var setLook = computeLookAnglesFromSatrec(satrec, new Date(setMs));
-        var durationMin = Math.max(1, Math.round((setMs - activePass.riseTimeMs) / 60000));
+        var durationMin = Math.max(1, Math.round((setMs - activePass.riseTimeMs) / MS_PER_MINUTE));
         passes.push({
           riseTime: new Date(activePass.riseTimeMs),
           setTime: new Date(setMs),
@@ -1654,7 +1659,7 @@ function ensureWeeklyPassForecast(forceRefresh) {
   var cached = weeklyPassCache[norad];
   var cacheValid = cached &&
     cached.windowStartMs === tomorrowStartMs &&
-    (now - cached.computedAtMs) < (10 * 60 * 1000);
+    (now - cached.computedAtMs) < FORECAST_CACHE_DURATION_MS;
 
   if (!forceRefresh && cacheValid) return;
 
@@ -1679,7 +1684,7 @@ function renderPassForecastTable() {
   var passes = cache ? cache.passes : [];
 
   if (!passes || passes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="pass-forecast-empty">翌日以降7日間のパスはありません</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="pass-forecast-empty" lang="ja">翌日以降7日間のパスはありません</td></tr>';
     return;
   }
 
