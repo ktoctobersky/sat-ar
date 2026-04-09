@@ -1170,8 +1170,8 @@ var _emaHdgSin = 0;    // EMA of sin(heading)
 var _emaHdgCos = 1;    // EMA of cos(heading)
 var _emaElev   = 0;    // EMA of elevation
 var _emaInited = false; // seed first sample directly to avoid cold-start lag
-var HEADING_SNAP_STEP_DEG = 0;       // 0で無効（連続角で表示）
-var HEADING_SNAP_HYST_DEG = 1.5;     // 境界付近の行き来を防ぐヒステリシス
+var HEADING_SNAP_STEP_DEG = 3;       // 3度単位で方位を量子化（ジッター抑制）
+var HEADING_SNAP_HYST_DEG = 1.2;     // 境界付近の行き来を防ぐヒステリシス
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
 var HEADING_WINDOW_SIZE = 7;         // 方位の短窓ロバスト平均
 var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 実回転は追従しつつ、瞬間ジャンプのみ抑制
@@ -1198,6 +1198,21 @@ var _lastAlphaHeading = null;
 var _lastAlphaUpdatedTs = 0;
 var _hasOutputHeading = false;
 var _lastOutputHeading = 0;
+var _headingRateDegPerSec = 0;
+var _satMotionRateDegPerSec = 0;
+var _lastSatMotionSampleTs = 0;
+var _satMotionSamples = {};          // { norad: { azimuth, elevation } }
+var _lastMarkerUpdateTs = 0;
+var _markerUpdateIntervalMs = 120;   // 初期は約8.3fps相当、速度サンプル取得後に動的に更新
+var MARKER_UPDATE_INTERVAL_MIN_MS = 70;
+var MARKER_UPDATE_INTERVAL_MAX_MS = 220;
+var MARKER_TARGET_ANGLE_DEG = 1.2;   // マーカー更新間で許容する角度変化量
+var MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC = 120;
+var MIN_ACTIVE_RATE_DEG_PER_SEC = 0.2;
+var HEADING_RATE_EMA_OLD_WEIGHT = 0.82;
+var HEADING_RATE_EMA_NEW_WEIGHT = 0.18;
+var SAT_MOTION_RATE_EMA_OLD_WEIGHT = 0.75;
+var SAT_MOTION_RATE_EMA_NEW_WEIGHT = 0.25;
 var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
@@ -1439,6 +1454,9 @@ function handleOrientation(e) {
   }
   heading = ((heading % 360) + 360) % 360;
   heading = getRobustHeadingFromWindow(heading);
+  _headingRateDegPerSec =
+    _headingRateDegPerSec * HEADING_RATE_EMA_OLD_WEIGHT +
+    alphaRateDegPerSec * HEADING_RATE_EMA_NEW_WEIGHT;
 
   // --- Elevation from pitch/roll ---
   var headRad = heading * Math.PI / 180;
@@ -1470,6 +1488,21 @@ function handleOrientation(e) {
   smoothedHeading = applyHeadingRateLimit(smoothedHeading, dtSec);
   deviceHeading   = snapHeadingByStepWithHysteresis(smoothedHeading);
   deviceElevation = _emaElev;
+}
+
+function updateAdaptiveMarkerInterval(nowMs) {
+  var satRate = (isFinite(_satMotionRateDegPerSec) && _satMotionRateDegPerSec > 0)
+    ? _satMotionRateDegPerSec
+    : 0;
+  var headingRate = (isFinite(_headingRateDegPerSec) && _headingRateDegPerSec > 0)
+    ? Math.min(_headingRateDegPerSec, MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC)
+    : 0;
+  var activeRate = Math.max(satRate, headingRate, MIN_ACTIVE_RATE_DEG_PER_SEC);
+  var nextInterval = (MARKER_TARGET_ANGLE_DEG / activeRate) * 1000;
+  if (nextInterval < MARKER_UPDATE_INTERVAL_MIN_MS) nextInterval = MARKER_UPDATE_INTERVAL_MIN_MS;
+  if (nextInterval > MARKER_UPDATE_INTERVAL_MAX_MS) nextInterval = MARKER_UPDATE_INTERVAL_MAX_MS;
+  _markerUpdateIntervalMs = nextInterval;
+  if (_lastMarkerUpdateTs === 0) _lastMarkerUpdateTs = nowMs;
 }
 
 function getRobustHeadingFromWindow(heading) {
@@ -2054,6 +2087,7 @@ function render() {
   });
 
   satDataCache = satData;  // rAF用に保存
+  updateSatMotionRate(now, satData);
 
   // 自動追跡: 可視衛星 + 次に来る2機
   var newAutoTracked = [];
@@ -2157,6 +2191,51 @@ function render() {
     if (metaEl) {
       metaEl.innerHTML = item.sat.freq + ' &middot; EL ' + item.pos.elevation.toFixed(0) + '&deg;';
     }
+  });
+}
+
+function updateSatMotionRate(now, satData) {
+  var nowMs = now.getTime();
+  if (_lastSatMotionSampleTs === 0) {
+    _lastSatMotionSampleTs = nowMs;
+    cacheSatMotionSamples(satData);
+    _satMotionRateDegPerSec = 0;
+    return;
+  }
+
+  var dtSec = (nowMs - _lastSatMotionSampleTs) / 1000;
+  if (!isFinite(dtSec) || dtSec <= 0) {
+    cacheSatMotionSamples(satData);
+    _lastSatMotionSampleTs = nowMs;
+    return;
+  }
+  _lastSatMotionSampleTs = nowMs;
+
+  var maxRate = 0;
+  satData.forEach(function(item) {
+    var norad = item.sat.norad;
+    var prev = _satMotionSamples[norad];
+    if (prev) {
+      var azRate = normalizeAzDiff(item.pos.azimuth - prev.azimuth) / dtSec;
+      var elRate = (item.pos.elevation - prev.elevation) / dtSec;
+      var rate = Math.sqrt(azRate * azRate + elRate * elRate);
+      if (rate > maxRate) maxRate = rate;
+    }
+    _satMotionSamples[norad] = { azimuth: item.pos.azimuth, elevation: item.pos.elevation };
+  });
+
+  _satMotionRateDegPerSec =
+    _satMotionRateDegPerSec * SAT_MOTION_RATE_EMA_OLD_WEIGHT +
+    maxRate * SAT_MOTION_RATE_EMA_NEW_WEIGHT;
+}
+
+function cacheSatMotionSamples(satData) {
+  _satMotionSamples = {};
+  satData.forEach(function(item) {
+    _satMotionSamples[item.sat.norad] = {
+      azimuth: item.pos.azimuth,
+      elevation: item.pos.elevation
+    };
   });
 }
 
@@ -2444,8 +2523,13 @@ function updateOrientationDisplay() {
   var offset = barCenterOffset - (deviceHeading * tickWidth / 10) - tickWidth / 2;
   compassBar.style.transform = 'translateX(' + offset + 'px)';
 
-  // マーカー位置を毎フレーム更新（デバイスの向きに追従）
-  positionMarkersAndEdges();
+  // 衛星の見かけ速度 + 端末の回転速度から必要周期だけ更新
+  var nowMs = Date.now();
+  updateAdaptiveMarkerInterval(nowMs);
+  if ((nowMs - _lastMarkerUpdateTs) >= _markerUpdateIntervalMs) {
+    positionMarkersAndEdges();
+    _lastMarkerUpdateTs = nowMs;
+  }
 
   if (isRunning) requestAnimationFrame(updateOrientationDisplay);
 }
