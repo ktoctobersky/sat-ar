@@ -1169,11 +1169,14 @@ function handleGyro(e) {
   lastGyroTime = now;
   if (dt <= 0 || dt > 0.2) return; // skip stale or first reading
 
-  // Approximate body yaw from device rotation rates, accounting for phone tilt
-  // When phone is tilted backward, yaw maps to mix of alpha and gamma
-  var tiltRad = Math.max(0, 90 - devicePitch) * Math.PI / 180;
-  var yawRate = (e.rotationRate.alpha || 0) * Math.cos(tiltRad)
-              + (e.rotationRate.gamma || 0) * Math.sin(tiltRad);
+  // Recover world-yaw rate from device rotation rates.
+  // World vertical projects onto device Z by cos(pitch), onto Y by sin(pitch).
+  //   alpha_measured = world_yaw * cos(pitch)   [Z-axis component]
+  //   gamma_measured = world_yaw * sin(pitch)   [Y-axis component]
+  // So: world_yaw = alpha*cos(pitch) + gamma*sin(pitch)
+  var pitchRad = Math.max(0, Math.min(90, devicePitch)) * Math.PI / 180;
+  var yawRate = (e.rotationRate.alpha || 0) * Math.cos(pitchRad)
+              + (e.rotationRate.gamma || 0) * Math.sin(pitchRad);
   // webkitCompassHeading is CW from north; rotationRate.alpha positive = CCW
   gyroYawDelta -= yawRate * dt;
 }
@@ -1198,6 +1201,7 @@ function handleOrientation(e) {
   if (!isSteepMode && Math.abs(deviceEl) > STEEP_PITCH_ENTER) {
     isSteepMode = true;
     gyroYawDelta = 0; // reset gyro accumulator on entering steep mode
+    lastStableHeading = deviceHeading; // anchor to smoothed heading for seamless transition
     dlog('STEEP mode ON (el=' + deviceEl.toFixed(0) + ')');
   } else if (isSteepMode && Math.abs(deviceEl) < STEEP_PITCH_EXIT) {
     isSteepMode = false;
