@@ -1730,8 +1730,26 @@ function initPersistentElements() {
 // ============================================================
 // rAF毎フレーム: マーカー位置・エッジインジケータ・軌道弧を更新
 // ============================================================
+function normalizeAzDiff(raw) {
+  while (raw > 180) raw -= 360;
+  while (raw < -180) raw += 360;
+  return raw;
+}
+
 function positionMarkersAndEdges() {
-  if (!isRunning || !observer || satDataCache.length === 0) return;
+  if (!isRunning || !observer || satDataCache.length === 0) {
+    // データ未準備時は全マーカーを隠す
+    TRACKED_SATS.forEach(function(sat) {
+      var elems = markerEls[sat.norad];
+      if (elems) {
+        elems.marker.style.display = 'none';
+        elems.edge.style.display = 'none';
+        elems.guide.style.display = 'none';
+        elems.svg.style.display = 'none';
+      }
+    });
+    return;
+  }
 
   var screenW = window.innerWidth;
   var screenH = window.innerHeight;
@@ -1751,9 +1769,7 @@ function positionMarkersAndEdges() {
     var tracked = isSatTracked(sat.norad);
 
     // 方位差・仰角差を計算
-    var azDiff = pos.azimuth - deviceHeading;
-    while (azDiff > 180) azDiff -= 360;
-    while (azDiff < -180) azDiff += 360;
+    var azDiff = normalizeAzDiff(pos.azimuth - deviceHeading);
     var elDiff = pos.elevation - deviceElevation;
 
     // 画面中心からのオフセット（ピクセル）
@@ -1777,9 +1793,7 @@ function positionMarkersAndEdges() {
       var showEdge = visible || (tracked && pass && pass.riseTime);
       if (showEdge) {
         var edgeAz = visible ? pos.azimuth : pass.azAtRise;
-        var edgeAzDiff = edgeAz - deviceHeading;
-        while (edgeAzDiff > 180) edgeAzDiff -= 360;
-        while (edgeAzDiff < -180) edgeAzDiff += 360;
+        var edgeAzDiff = normalizeAzDiff(edgeAz - deviceHeading);
 
         if (Math.abs(edgeAzDiff) < halfFovH) {
           // 方位が合っている → ガイド表示（仰角方向を誘導）
@@ -1872,9 +1886,7 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
 
   // 軌道点を現在の向きでスクリーン座標に変換
   var points = trajectory.map(function(pt) {
-    var azDiff = pt.az - deviceHeading;
-    while (azDiff > 180) azDiff -= 360;
-    while (azDiff < -180) azDiff += 360;
+    var azDiff = normalizeAzDiff(pt.az - deviceHeading);
     var elDiff = pt.el - deviceElevation;
     return {
       x: screenW / 2 + (azDiff / halfFovH) * (screenW / 2),
