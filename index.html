@@ -1183,6 +1183,7 @@ var FORECAST_CACHE_DURATION_MS = 10 * MS_PER_MINUTE;
 var FORECAST_RECALC_INTERVAL_MS = 10 * MS_PER_MINUTE;
 var PASS_DETECTION_STEP_MS = 30 * 1000;
 var HORIZON_CROSSING_ITERATIONS = 14; // Converges to sub-2ms precision, enough for AOS/LOS timing
+var TEXT_NO_WEEKLY_PASSES = '翌日以降7日間のパスはありません';
 
 // ============================================================
 // スタート
@@ -1677,22 +1678,49 @@ function renderPassForecastTable() {
   var cache = weeklyPassCache[selectedForecastNorad];
   var passes = cache ? cache.passes : [];
 
+  tbody.textContent = '';
+
   if (!passes || passes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="pass-forecast-empty" lang="ja">翌日以降7日間のパスはありません</td></tr>';
+    var emptyRow = document.createElement('tr');
+    var emptyCell = document.createElement('td');
+    emptyCell.colSpan = 5;
+    emptyCell.className = 'pass-forecast-empty';
+    emptyCell.setAttribute('lang', 'ja');
+    emptyCell.textContent = TEXT_NO_WEEKLY_PASSES;
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
     return;
   }
 
-  tbody.innerHTML = passes.map(function(pass) {
+  passes.forEach(function(pass) {
     var fromDir = headingToCardinal(pass.azAtRise);
     var toDir = headingToCardinal(pass.azAtSet);
-    return '<tr>' +
-      '<td>' + formatPassDate(pass.riseTime) + '</td>' +
-      '<td>' + formatPassTime(pass.riseTime) + '</td>' +
-      '<td>' + fromDir + ' ' + pass.azAtRise + '° → ' + toDir + ' ' + pass.azAtSet + '°</td>' +
-      '<td class="max-el">' + pass.maxEl + '°</td>' +
-      '<td class="duration">' + pass.durationMin + '分</td>' +
-      '</tr>';
-  }).join('');
+    var row = document.createElement('tr');
+
+    var dateCell = document.createElement('td');
+    dateCell.textContent = formatPassDate(pass.riseTime);
+    row.appendChild(dateCell);
+
+    var timeCell = document.createElement('td');
+    timeCell.textContent = formatPassTime(pass.riseTime);
+    row.appendChild(timeCell);
+
+    var dirCell = document.createElement('td');
+    dirCell.textContent = fromDir + ' ' + pass.azAtRise + '° → ' + toDir + ' ' + pass.azAtSet + '°';
+    row.appendChild(dirCell);
+
+    var maxElCell = document.createElement('td');
+    maxElCell.className = 'max-el';
+    maxElCell.textContent = pass.maxEl + '°';
+    row.appendChild(maxElCell);
+
+    var durationCell = document.createElement('td');
+    durationCell.className = 'duration';
+    durationCell.textContent = pass.durationMin + '分';
+    row.appendChild(durationCell);
+
+    tbody.appendChild(row);
+  });
 }
 
 function initPassForecastPanel() {
