@@ -21,6 +21,8 @@
     --fm-sat: #4fb3d9;
     --linear: #b88ce8;
     --digi: #9be892;
+    --good-pass: #ffd84d;
+    --good-pass-shadow: rgba(255, 216, 77, 0.35);
     --glass: rgba(10, 14, 24, 0.78);
     --grid: rgba(245, 241, 230, 0.14);
   }
@@ -462,6 +464,17 @@
     stroke-linejoin: round;
     stroke-dasharray: 8 5;
     opacity: 0.35;
+  }
+  .orbit-path-future.good-pass {
+    stroke: var(--good-pass) !important;
+    stroke-width: 4;
+    stroke-dasharray: 10 4;
+    opacity: 0.82;
+  }
+  .max-el.good-pass {
+    color: var(--good-pass);
+    font-weight: 700;
+    text-shadow: 0 0 6px var(--good-pass-shadow);
   }
 
   /* ---- Next-up banner (常時表示、コンパクト) ---- */
@@ -1157,9 +1170,35 @@ var _emaHdgSin = 0;    // EMA of sin(heading)
 var _emaHdgCos = 1;    // EMA of cos(heading)
 var _emaElev   = 0;    // EMA of elevation
 var _emaInited = false; // seed first sample directly to avoid cold-start lag
-var HEADING_SNAP_STEP_DEG = 5;       // 0で無効。5°刻みで安定化
+var HEADING_SNAP_STEP_DEG = 0;       // 0で無効（連続角で表示）
 var HEADING_SNAP_HYST_DEG = 1.5;     // 境界付近の行き来を防ぐヒステリシス
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
+var HEADING_WINDOW_SIZE = 7;         // 方位の短窓ロバスト平均
+var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 実回転は追従しつつ、瞬間ジャンプのみ抑制
+var ORIENTATION_DT_DEFAULT_SEC = 1 / 60;
+var ORIENTATION_DT_MAX_SEC = 0.2;
+var HEADING_TRIM_MIN_SAMPLES = 5;    // 5〜7サンプル窓でトリム平均を有効化
+var HEADING_TRIM_COUNT = 1;          // 両端1サンプル除去
+var CAL_ALPHA_MAX_AGE_MS = 2000;
+var MAG_CORR_STRONG_RATE_MAX = 35;
+var MAG_CORR_STRONG_RESIDUAL_MAX = 35;
+var MAG_CORR_MEDIUM_RESIDUAL_MAX = 60;
+var MAG_CORR_WEAK_RATE_MAX = 80;
+var MAG_CORR_WEAK_RESIDUAL_MAX = 25;
+var MAG_CORR_GAIN_STRONG = 0.06;
+var MAG_CORR_GAIN_MEDIUM = 0.02;
+var MAG_CORR_GAIN_WEAK = 0.01;
+var HEADING_EMA_RATE_FAST = 90;
+var HEADING_EMA_RATE_MID = 40;
+var HEADING_EMA_K_FAST = 0.30;
+var HEADING_EMA_K_MID = 0.22;
+var _headingWindow = [];
+var _lastOrientationTs = 0;
+var _lastAlphaHeading = null;
+var _lastAlphaUpdatedTs = 0;
+var _hasOutputHeading = false;
+var _lastOutputHeading = 0;
+var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
 // to convert the relative alpha into an absolute (true-north) heading.
@@ -1331,10 +1370,16 @@ function requestGeolocation() {
 function handleOrientation(e) {
   var pitch = e.beta || 0;
   var roll = e.gamma || 0;
+  var nowTs = (typeof e.timeStamp === 'number') ? e.timeStamp : Date.now();
+  var dtSec = _lastOrientationTs > 0 ? (nowTs - _lastOrientationTs) / 1000 : ORIENTATION_DT_DEFAULT_SEC;
+  _lastOrientationTs = nowTs;
+  if (!(dtSec > 0)) dtSec = ORIENTATION_DT_DEFAULT_SEC;
+  if (dtSec > ORIENTATION_DT_MAX_SEC) dtSec = ORIENTATION_DT_MAX_SEC;
 
   // --- Heading ---
   var alphaHeading = null; // OS-fused heading (CW, relative on iOS / absolute on Android)
   var rawCompass = null;   // raw magnetometer heading (CW from north, iOS only)
+  var alphaRateDegPerSec = 0;
 
   if (typeof e.alpha === 'number') {
     alphaHeading = (360 - e.alpha) % 360; // convert CCW alpha to CW heading
@@ -1346,27 +1391,54 @@ function handleOrientation(e) {
 
   var heading;
   if (alphaHeading !== null && rawCompass !== null) {
-    // iOS: alpha is relative → calibrate with compassOffset (set at startup or by CAL button)
+    // iOS: alpha is relative → calibrate with compassOffset (seed + adaptive correction)
     if (!_emaInited) {
       // First sample: seed the offset from the raw compass so we start pointing north
       compassOffset = rawCompass - alphaHeading;
       if (compassOffset > 180) compassOffset -= 360;
       if (compassOffset < -180) compassOffset += 360;
+    } else {
+      if (_lastAlphaHeading !== null) {
+        alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
+      }
+      var predicted = ((alphaHeading + compassOffset) % 360 + 360) % 360;
+      var residual = normalizeAzDiff(rawCompass - predicted);
+      var residualAbs = Math.abs(residual);
+      var correctionGain = 0;
+      if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_STRONG_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_STRONG;
+      else if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_MEDIUM_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_MEDIUM;
+      else if (alphaRateDegPerSec < MAG_CORR_WEAK_RATE_MAX && residualAbs < MAG_CORR_WEAK_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_WEAK;
+      if (correctionGain > 0) {
+        compassOffset += residual * correctionGain;
+        if (compassOffset > 180) compassOffset -= 360;
+        if (compassOffset < -180) compassOffset += 360;
+      }
     }
-    // No continuous magnetometer correction here — that is what caused the jitter.
-    // The CAL button lets the user re-calibrate on demand.
     heading = alphaHeading + compassOffset;
+    _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else if (e.absolute && alphaHeading !== null) {
     // Android absolute: alpha IS the compass heading
     heading = alphaHeading;
+    if (_lastAlphaHeading !== null) {
+      alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
+    }
+    _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else if (rawCompass !== null) {
     heading = rawCompass;
   } else if (alphaHeading !== null) {
     heading = alphaHeading;
+    if (_lastAlphaHeading !== null) {
+      alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
+    }
+    _lastAlphaHeading = alphaHeading;
+    _lastAlphaUpdatedTs = Date.now();
   } else {
     heading = 0;
   }
   heading = ((heading % 360) + 360) % 360;
+  heading = getRobustHeadingFromWindow(heading);
 
   // --- Elevation from pitch/roll ---
   var headRad = heading * Math.PI / 180;
@@ -1384,16 +1456,62 @@ function handleOrientation(e) {
     _emaElev   = rawElevation;
     _emaInited = true;
   } else {
-    _emaHdgSin = (1 - EMA_K) * _emaHdgSin + EMA_K * rawSin;
-    _emaHdgCos = (1 - EMA_K) * _emaHdgCos + EMA_K * rawCos;
+    var headingK = EMA_K;
+    if (alphaRateDegPerSec > HEADING_EMA_RATE_FAST) headingK = HEADING_EMA_K_FAST;
+    else if (alphaRateDegPerSec > HEADING_EMA_RATE_MID) headingK = HEADING_EMA_K_MID;
+    _emaHdgSin = (1 - headingK) * _emaHdgSin + headingK * rawSin;
+    _emaHdgCos = (1 - headingK) * _emaHdgCos + headingK * rawCos;
     _emaElev   = (1 - EMA_K) * _emaElev   + EMA_K * rawElevation;
   }
 
   var smoothedHeading = Math.atan2(_emaHdgSin, _emaHdgCos) * 180 / Math.PI;
   if (smoothedHeading < 0) smoothedHeading += 360;
 
+  smoothedHeading = applyHeadingRateLimit(smoothedHeading, dtSec);
   deviceHeading   = snapHeadingByStepWithHysteresis(smoothedHeading);
   deviceElevation = _emaElev;
+}
+
+function getRobustHeadingFromWindow(heading) {
+  _headingWindow.push(heading);
+  if (_headingWindow.length > HEADING_WINDOW_SIZE) _headingWindow.shift();
+  if (_headingWindow.length < 3) return heading;
+
+  var anchor = _headingWindow[_headingWindow.length - 1];
+  var diffs = _headingWindow.map(function(h) {
+    return normalizeAzDiff(h - anchor);
+  }).sort(function(a, b) { return a - b; });
+
+  var trim = diffs.length >= HEADING_TRIM_MIN_SAMPLES ? HEADING_TRIM_COUNT : 0;
+  var sum = 0;
+  var count = 0;
+  for (var i = trim; i < diffs.length - trim; i++) {
+    sum += diffs[i];
+    count++;
+  }
+  if (count === 0) return anchor;
+  return ((anchor + (sum / count)) % 360 + 360) % 360;
+}
+
+function computeAlphaRate(alphaHeading, dtSec) {
+  if (_lastAlphaHeading === null || !(dtSec > 0)) return 0;
+  return Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
+}
+
+function applyHeadingRateLimit(targetHeading, dtSec) {
+  if (!_hasOutputHeading) {
+    _lastOutputHeading = targetHeading;
+    _hasOutputHeading = true;
+    return targetHeading;
+  }
+  var maxStep = HEADING_MAX_RATE_DEG_PER_SEC * dtSec;
+  var diff = normalizeAzDiff(targetHeading - _lastOutputHeading);
+  if (Math.abs(diff) > maxStep) {
+    targetHeading = _lastOutputHeading + (diff > 0 ? maxStep : -maxStep);
+  }
+  targetHeading = ((targetHeading % 360) + 360) % 360;
+  _lastOutputHeading = targetHeading;
+  return targetHeading;
 }
 
 function snapHeadingByStepWithHysteresis(heading) {
@@ -1478,18 +1596,21 @@ function startTracking() {
   // CAL button: recalibrate compass offset from the latest raw magnetometer reading
   document.getElementById('calBtn').addEventListener('click', function() {
     var btn = this;
-    if (_lastRawCompass !== null && _emaInited) {
+    if (_lastRawCompass !== null && _emaInited && _lastAlphaHeading !== null &&
+        (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
       // Compute the current alpha-based heading (without any offset)
-      var currentAlpha = deviceHeading - compassOffset;
-      var newOffset = _lastRawCompass - currentAlpha;
+      var alphaHeadingForCal = _lastAlphaHeading;
+      var newOffset = _lastRawCompass - alphaHeadingForCal;
       if (newOffset > 180) newOffset -= 360;
       if (newOffset < -180) newOffset += 360;
       compassOffset = newOffset;
       // Re-seed EMA so the new absolute heading takes effect immediately
-      var newHeadRad = ((((currentAlpha + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
+      var newHeadRad = ((((alphaHeadingForCal + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
       _emaHdgSin = Math.sin(newHeadRad);
       _emaHdgCos = Math.cos(newHeadRad);
       _snappedHeading = null;
+      _headingWindow = [];
+      _hasOutputHeading = false;
       dlog('calBtn: reseeded compassOffset=' + compassOffset.toFixed(1));
     }
     // Flash the button to give tactile feedback
@@ -1712,6 +1833,7 @@ function renderPassForecastTable() {
 
     var maxElCell = document.createElement('td');
     maxElCell.className = 'max-el';
+    if (pass.maxEl >= GOOD_PASS_ELEVATION_DEG) maxElCell.className += ' good-pass';
     maxElCell.textContent = pass.maxEl + '°';
     row.appendChild(maxElCell);
 
@@ -2241,7 +2363,7 @@ function positionMarkersAndEdges() {
 
     // ---- 軌道弧SVGをrAFで更新（端末の向きに追随） ----
     if ((visible || tracked) && pass && pass.trajectory && pass.trajectory.length >= 2) {
-      updateOrbitSvgPath(elems, pass.trajectory, screenW, screenH, halfFovH, halfFovV, nowMs);
+      updateOrbitSvgPath(elems, pass.trajectory, screenW, screenH, halfFovH, halfFovV, nowMs, pass.maxEl);
     } else {
       elems.svg.style.display = 'none';
     }
@@ -2257,7 +2379,7 @@ function buildSvgPathD(pts) {
   return d;
 }
 
-function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfFovV, nowMs) {
+function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfFovV, nowMs, maxEl) {
   var margin = 60;
 
   // 軌道点を現在の向きでスクリーン座標に変換
@@ -2299,6 +2421,11 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
 
   elems.pastPath.setAttribute('d', buildSvgPathD(pastPts));
   elems.futurePath.setAttribute('d', buildSvgPathD(futurePts));
+  if (typeof maxEl === 'number' && maxEl >= GOOD_PASS_ELEVATION_DEG) {
+    elems.futurePath.classList.add('good-pass');
+  } else {
+    elems.futurePath.classList.remove('good-pass');
+  }
 }
 
 function updateOrientationDisplay() {
