@@ -929,7 +929,7 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
           <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite"></select>
         </div>
         <div class="pass-forecast-wrap">
-          <table class="pass-forecast-table" lang="ja">
+          <table class="pass-forecast-table" lang="ja" aria-label="7-day satellite pass forecast table">
             <thead>
               <tr>
                 <th>日付</th>
@@ -1182,7 +1182,7 @@ var MS_PER_MINUTE = 60 * 1000;
 var FORECAST_CACHE_DURATION_MS = 10 * MS_PER_MINUTE;
 var FORECAST_RECALC_INTERVAL_MS = 10 * MS_PER_MINUTE;
 var PASS_DETECTION_STEP_MS = 30 * 1000;
-var HORIZON_CROSSING_ITERATIONS = 14; // 約2ms未満まで収束し、AOS/LOS判定に十分
+var HORIZON_CROSSING_ITERATIONS = 14; // Converges to sub-2ms precision, enough for AOS/LOS timing
 
 // ============================================================
 // スタート
