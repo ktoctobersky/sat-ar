@@ -1498,7 +1498,6 @@ function updateAdaptiveMarkerInterval(nowMs) {
     ? Math.min(_headingRateDegPerSec, MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC)
     : 0;
   var activeRate = Math.max(satRate, headingRate, MIN_ACTIVE_RATE_DEG_PER_SEC);
-  if (!(activeRate > 0)) activeRate = MIN_ACTIVE_RATE_DEG_PER_SEC;
   var nextInterval = (MARKER_TARGET_ANGLE_DEG / activeRate) * 1000;
   if (nextInterval < MARKER_UPDATE_INTERVAL_MIN_MS) nextInterval = MARKER_UPDATE_INTERVAL_MIN_MS;
   if (nextInterval > MARKER_UPDATE_INTERVAL_MAX_MS) nextInterval = MARKER_UPDATE_INTERVAL_MAX_MS;
@@ -2199,25 +2198,14 @@ function updateSatMotionRate(now, satData) {
   var nowMs = now.getTime();
   if (_lastSatMotionSampleTs === 0) {
     _lastSatMotionSampleTs = nowMs;
-    _satMotionSamples = {};
-    satData.forEach(function(item) {
-      _satMotionSamples[item.sat.norad] = {
-        azimuth: item.pos.azimuth,
-        elevation: item.pos.elevation
-      };
-    });
+    cacheSatMotionSamples(satData);
     _satMotionRateDegPerSec = 0;
     return;
   }
 
   var dtSec = (nowMs - _lastSatMotionSampleTs) / 1000;
   if (!isFinite(dtSec) || dtSec <= 0) {
-    satData.forEach(function(item) {
-      _satMotionSamples[item.sat.norad] = {
-        azimuth: item.pos.azimuth,
-        elevation: item.pos.elevation
-      };
-    });
+    cacheSatMotionSamples(satData);
     _lastSatMotionSampleTs = nowMs;
     return;
   }
@@ -2233,15 +2221,22 @@ function updateSatMotionRate(now, satData) {
       var rate = Math.sqrt(azRate * azRate + elRate * elRate);
       if (rate > maxRate) maxRate = rate;
     }
-    _satMotionSamples[norad] = {
-      azimuth: item.pos.azimuth,
-      elevation: item.pos.elevation
-    };
+    _satMotionSamples[norad] = { azimuth: item.pos.azimuth, elevation: item.pos.elevation };
   });
 
   _satMotionRateDegPerSec =
     _satMotionRateDegPerSec * SAT_MOTION_RATE_EMA_OLD_WEIGHT +
     maxRate * SAT_MOTION_RATE_EMA_NEW_WEIGHT;
+}
+
+function cacheSatMotionSamples(satData) {
+  _satMotionSamples = {};
+  satData.forEach(function(item) {
+    _satMotionSamples[item.sat.norad] = {
+      azimuth: item.pos.azimuth,
+      elevation: item.pos.elevation
+    };
+  });
 }
 
 // ============================================================
