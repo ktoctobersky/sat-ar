@@ -1044,17 +1044,13 @@ var observerLabel = '---';
 var deviceHeading = 0;
 var deviceElevation = 0;
 
-// Sensor ring buffer for stable heading/elevation (replaces EMA)
-// 15 samples at ~60Hz ≈ 0.25 second averaging window (less lag than 30)
-var SENSOR_WINDOW = 15;
-var _hdgSinBuf = new Array(SENSOR_WINDOW).fill(0);
-var _hdgCosBuf = new Array(SENSOR_WINDOW).fill(1);
-var _elevBuf   = new Array(SENSOR_WINDOW).fill(0);
-var _sensorPtr   = 0;  // write pointer
-var _sensorCount = 0;  // samples collected (capped at SENSOR_WINDOW)
-var _hdgSinSum = 0;
-var _hdgCosSum = SENSOR_WINDOW;
-var _elevSum   = 0;
+// EMA (Exponential Moving Average) smoothing for heading/elevation — AR.js style
+// k=0.15: near-zero lag with noise removal equivalent to a ~13-sample window
+var EMA_K = 0.15;
+var _emaHdgSin = 0;    // EMA of sin(heading)
+var _emaHdgCos = 1;    // EMA of cos(heading)
+var _emaElev   = 0;    // EMA of elevation
+var _emaInited = false; // seed first sample directly to avoid cold-start lag
 // Heading: OS-fused alpha + compass offset for absolute calibration
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
 // Compass offset correction
@@ -1226,7 +1222,7 @@ function handleOrientation(e) {
   var heading;
   if (alphaHeading !== null && rawCompass !== null) {
     // iOS: alpha is relative → calibrate with compass offset
-    if (_sensorCount === 0) {
+    if (!_emaInited) {
       compassOffset = rawCompass - alphaHeading;
       if (compassOffset > 180) compassOffset -= 360;
       if (compassOffset < -180) compassOffset += 360;
@@ -1262,30 +1258,24 @@ function handleOrientation(e) {
   var rRad = roll * Math.PI / 180;
   var rawElevation = Math.asin(Math.max(-1, Math.min(1, -Math.cos(pRad) * Math.cos(rRad)))) * 180 / Math.PI;
 
-  // --- Ring buffer update ---
-  // Subtract the oldest sample from running sums
-  _hdgSinSum -= _hdgSinBuf[_sensorPtr];
-  _hdgCosSum -= _hdgCosBuf[_sensorPtr];
-  _elevSum   -= _elevBuf[_sensorPtr];
-  // Write new sample
-  _hdgSinBuf[_sensorPtr] = rawSin;
-  _hdgCosBuf[_sensorPtr] = rawCos;
-  _elevBuf[_sensorPtr]   = rawElevation;
-  // Advance pointer
-  _sensorPtr = (_sensorPtr + 1) % SENSOR_WINDOW;
-  if (_sensorCount < SENSOR_WINDOW) _sensorCount++;
-  // Add new sample to running sums
-  _hdgSinSum += rawSin;
-  _hdgCosSum += rawCos;
-  _elevSum   += rawElevation;
+  // --- EMA update (AR.js style: k=0.15, angle-wrap-aware) ---
+  if (!_emaInited) {
+    // Seed EMA with first sample to avoid cold-start lag
+    _emaHdgSin = rawSin;
+    _emaHdgCos = rawCos;
+    _emaElev   = rawElevation;
+    _emaInited = true;
+  } else {
+    _emaHdgSin = (1 - EMA_K) * _emaHdgSin + EMA_K * rawSin;
+    _emaHdgCos = (1 - EMA_K) * _emaHdgCos + EMA_K * rawCos;
+    _emaElev   = (1 - EMA_K) * _emaElev   + EMA_K * rawElevation;
+  }
 
-  // Compute window mean
-  var n = _sensorCount;
-  var smoothedHeading = Math.atan2(_hdgSinSum / n, _hdgCosSum / n) * 180 / Math.PI;
+  var smoothedHeading = Math.atan2(_emaHdgSin, _emaHdgCos) * 180 / Math.PI;
   if (smoothedHeading < 0) smoothedHeading += 360;
 
   deviceHeading   = smoothedHeading;
-  deviceElevation = _elevSum / n;
+  deviceElevation = _emaElev;
 }
 
 async function requestCamera() {
@@ -1925,9 +1915,6 @@ function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfF
   elems.futurePath.setAttribute('d', buildSvgPathD(futurePts));
 }
 
-var _lastMarkerUpdateMs = 0;
-var MARKER_UPDATE_INTERVAL_MS = 200;  // marker position update rate: 5fps (tracks heading smoothly)
-
 function updateOrientationDisplay() {
   var headingBig = document.getElementById('headingBig');
   var headingCard = document.getElementById('headingCard');
@@ -1944,12 +1931,8 @@ function updateOrientationDisplay() {
   var offset = barCenterOffset - (deviceHeading * tickWidth / 10) - tickWidth / 2;
   compassBar.style.transform = 'translateX(' + offset + 'px)';
 
-  // マーカー位置は10fpsに制限（センサー平均が安定しているためそれ以上は不要）
-  var now = performance.now();
-  if (now - _lastMarkerUpdateMs >= MARKER_UPDATE_INTERVAL_MS) {
-    _lastMarkerUpdateMs = now;
-    positionMarkersAndEdges();
-  }
+  // マーカー位置を毎フレーム更新（デバイスの向きに追従）
+  positionMarkersAndEdges();
 
   if (isRunning) requestAnimationFrame(updateOrientationDisplay);
 }
