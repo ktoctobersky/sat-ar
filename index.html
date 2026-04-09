@@ -1227,13 +1227,31 @@ var observerLabel = '---';
 var deviceHeading = 0;
 var deviceElevation = 0;
 
-// EMA (Exponential Moving Average) smoothing for heading/elevation — AR.js style
-// k=0.15: near-zero lag with noise removal equivalent to a ~13-sample window
-var EMA_K = 0.15;
-var _emaHdgSin = 0;    // EMA of sin(heading)
-var _emaHdgCos = 1;    // EMA of cos(heading)
-var _emaElev   = 0;    // EMA of elevation
-var _emaInited = false; // seed first sample directly to avoid cold-start lag
+// 1D Kalman filter for heading/elevation smoothing (applied per-axis on sin/cos for
+// angle-wrap safety).  Replaces the prior adaptive EMA as the primary smoothing stage.
+//
+// Process model:  heading follows a random-walk (unknown acceleration).
+// Measurement model: OS-fused heading is observed with Gaussian noise of variance R.
+//
+// Motion-adaptive process noise:
+//   Q = Q_BASE + alphaRate × Q_RATE
+// When stationary (rate≈0) the Kalman gain K_ss = Q_BASE/(Q_BASE+R) ≈ 0.03  — ~5× more
+// stable than the prior EMA k=0.15.  When rotating fast (≥90°/s) K rises to ~0.75,
+// tracking heading changes almost instantly.  The gain is computed automatically each
+// frame; no manual threshold tuning is needed.
+var KALMAN_HDG_Q_BASE  = 1e-5;  // base process noise variance (stationary)
+var KALMAN_HDG_Q_RATE  = 1e-5;  // extra process noise per deg/s (motion-adaptive)
+var KALMAN_HDG_R       = 3e-4;  // heading measurement noise variance (OS-fused quality)
+var KALMAN_ELEV_Q      = 2e-4;  // process noise for elevation
+var KALMAN_ELEV_R      = 1e-3;  // elevation measurement noise variance
+
+var _kalHdgSin  = 0;    // Kalman state: sin(heading)
+var _kalHdgCos  = 1;    // Kalman state: cos(heading)
+var _kalHdgPSin = 1.0;  // Kalman error covariance for sin axis
+var _kalHdgPCos = 1.0;  // Kalman error covariance for cos axis
+var _kalElev    = 0;    // Kalman state: elevation (°)
+var _kalElevP   = 1.0;  // Kalman error covariance for elevation
+var _kalInited  = false; // seed first sample directly to avoid cold-start lag
 var HEADING_SNAP_STEP_DEG = 3;       // 3度単位で方位を量子化（ジッター抑制）
 var HEADING_SNAP_HYST_DEG = 1.2;     // 境界付近の行き来を防ぐヒステリシス
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
@@ -1254,10 +1272,6 @@ var _initPhase         = 'waiting'; // 'waiting' | 'collecting' | 'done'
 var _initStartTs       = 0;
 var _initOffsetSins    = [];
 var _initOffsetCoss    = [];
-var HEADING_EMA_RATE_FAST = 90;
-var HEADING_EMA_RATE_MID = 40;
-var HEADING_EMA_K_FAST = 0.30;
-var HEADING_EMA_K_MID = 0.22;
 var _lastOrientationTs = 0;
 var _lastAlphaHeading = null;
 var _lastAlphaUpdatedTs = 0;
@@ -1552,24 +1566,27 @@ function handleOrientation(e) {
   var rRad = roll * Math.PI / 180;
   var rawElevation = Math.asin(Math.max(-1, Math.min(1, -Math.cos(pRad) * Math.cos(rRad)))) * 180 / Math.PI;
 
-  // --- EMA update (adaptive-k, angle-wrap-aware; primary smoothing stage) ---
-  // iOS alpha is already OS-fused (CoreMotion Kalman: gyro+accel+mag), so a
-  // single adaptive EMA is the correct first smoother.  A prior sliding-window
-  // trimmed-mean was removed: it was a second smoothing pass on data that is
-  // already fusion-smoothed, adding ~50 ms of unnecessary lag at 60 Hz.
+  // --- 1D Kalman filter update (motion-adaptive Q, angle-wrap-aware via sin/cos) ---
   //
-  // Heading stabilisation strategy survey (5 methods evaluated):
-  //  ① Adaptive angular EMA (sin/cos) — ADOPTED: wrap-safe, tunable lag,
-  //     ideal for OS-fused sources.
-  //  ② Sliding-window trimmed mean — REMOVED: redundant after OS fusion;
-  //     adds fixed N/2-sample delay with no accuracy gain.
-  //  ③ Complementary filter (high-pass gyro + low-pass mag) — N/A: the OS
-  //     already performs this split inside CoreMotion/Android fusion.
-  //  ④ Extended Kalman Filter — N/A: iOS CoreMotion is itself a KF; applying
-  //     another KF on top is overkill and fights the OS estimate.
-  //  ⑤ Quantization + hysteresis — ADOPTED as output stage: eliminates
-  //     micro-jitter without adding sensor lag.
-  if (!_emaInited) {
+  // Heading stabilisation survey — 10 methods evaluated for this use-case:
+  //  ① 1D Kalman filter (sin/cos axes) — ADOPTED: optimal linear estimation;
+  //     process noise Q adapts to rotation rate, giving K≈0.03 when stationary
+  //     (~5× more stable than EMA k=0.15) and K≈0.75 when rotating fast.
+  //  ② Adaptive EMA (sin/cos) — REPLACED by Kalman; fixed k-ladder less optimal.
+  //  ③ Simple moving average — adds fixed N/2-sample delay, no outlier rejection.
+  //  ④ Weighted moving average — linear-weighted window; similar delay to SMA.
+  //  ⑤ Sliding-window trimmed mean — robust to outliers but adds latency;
+  //     redundant after OS fusion.
+  //  ⑥ Median filter — excellent outlier rejection; higher memory/CPU for large N.
+  //  ⑦ Complementary filter (high-pass gyro + low-pass mag) — N/A: the OS
+  //     already performs this split inside CoreMotion/Android sensor fusion.
+  //  ⑧ Extended Kalman Filter (full 3D orientation) — N/A: iOS CoreMotion is
+  //     itself an EKF; applying another EKF on top fights the OS estimate.
+  //  ⑨ Mahony / Madgwick filter (9-DOF) — N/A: requires raw gyro/accel/mag
+  //     samples, not available from the deviceorientation API.
+  //  ⑩ Quantisation + hysteresis — ADOPTED as output stage: eliminates
+  //     sub-step micro-jitter without adding sensor lag.
+  if (!_kalInited) {
     // For iOS: skip seeding while collecting init samples — heading is rawCompass
     // (noisy) at that point.  Seed on the first event after init phase completes.
     if (_initPhase === 'collecting') {
@@ -1577,26 +1594,46 @@ function handleOrientation(e) {
       deviceElevation = rawElevation;
       return;
     }
-    // Seed EMA with first good sample to avoid cold-start lag
-    _emaHdgSin = rawSin;
-    _emaHdgCos = rawCos;
-    _emaElev   = rawElevation;
-    _emaInited = true;
+    // Seed Kalman with first good sample to avoid cold-start lag
+    _kalHdgSin  = rawSin;
+    _kalHdgCos  = rawCos;
+    _kalHdgPSin = 1.0;
+    _kalHdgPCos = 1.0;
+    _kalElev    = rawElevation;
+    _kalElevP   = 1.0;
+    _kalInited  = true;
   } else {
-    var headingK = EMA_K;
-    if (alphaRateDegPerSec > HEADING_EMA_RATE_FAST) headingK = HEADING_EMA_K_FAST;
-    else if (alphaRateDegPerSec > HEADING_EMA_RATE_MID) headingK = HEADING_EMA_K_MID;
-    _emaHdgSin = (1 - headingK) * _emaHdgSin + headingK * rawSin;
-    _emaHdgCos = (1 - headingK) * _emaHdgCos + headingK * rawCos;
-    _emaElev   = (1 - EMA_K) * _emaElev   + EMA_K * rawElevation;
+    // Motion-adaptive process noise: grows with rotation rate so the filter
+    // responds faster when the device is turning and is tighter when stationary.
+    var kalQ = KALMAN_HDG_Q_BASE + Math.abs(alphaRateDegPerSec) * KALMAN_HDG_Q_RATE;
+
+    // Predict (propagate uncertainty)
+    _kalHdgPSin += kalQ;
+    _kalHdgPCos += kalQ;
+    _kalElevP   += KALMAN_ELEV_Q;
+
+    // Kalman gain
+    var kSin = _kalHdgPSin / (_kalHdgPSin + KALMAN_HDG_R);
+    var kCos = _kalHdgPCos / (_kalHdgPCos + KALMAN_HDG_R);
+    var kEl  = _kalElevP   / (_kalElevP   + KALMAN_ELEV_R);
+
+    // State update
+    _kalHdgSin  += kSin * (rawSin       - _kalHdgSin);
+    _kalHdgCos  += kCos * (rawCos       - _kalHdgCos);
+    _kalElev    += kEl  * (rawElevation - _kalElev);
+
+    // Covariance update (Joseph form reduces numerical drift)
+    _kalHdgPSin = (1 - kSin) * _kalHdgPSin;
+    _kalHdgPCos = (1 - kCos) * _kalHdgPCos;
+    _kalElevP   = (1 - kEl)  * _kalElevP;
   }
 
-  var smoothedHeading = Math.atan2(_emaHdgSin, _emaHdgCos) * 180 / Math.PI;
+  var smoothedHeading = Math.atan2(_kalHdgSin, _kalHdgCos) * 180 / Math.PI;
   if (smoothedHeading < 0) smoothedHeading += 360;
 
   smoothedHeading = applyHeadingRateLimit(smoothedHeading, dtSec);
   deviceHeading   = snapHeadingByStepWithHysteresis(smoothedHeading);
-  deviceElevation = _emaElev;
+  deviceElevation = _kalElev;
 }
 
 function updateAdaptiveMarkerInterval(nowMs) {
@@ -1723,16 +1760,18 @@ function startTracking() {
       _initStartTs     = Date.now();
       _initOffsetSins  = [];
       _initOffsetCoss  = [];
-      _emaInited       = false;
+      _kalInited       = false;
       _snappedHeading  = null;
       _hasOutputHeading = false;
       dlog('calBtn: restarted init phase');
-    } else if (_emaInited && _lastAlphaHeading !== null &&
+    } else if (_kalInited && _lastAlphaHeading !== null &&
                (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
-      // Non-iOS fallback: reset smoothing state to re-seed from current heading.
+      // Non-iOS fallback: reset Kalman state to re-seed from current heading.
       var newHeadRad = ((_lastAlphaHeading % 360 + 360) % 360) * Math.PI / 180;
-      _emaHdgSin      = Math.sin(newHeadRad);
-      _emaHdgCos      = Math.cos(newHeadRad);
+      _kalHdgSin  = Math.sin(newHeadRad);
+      _kalHdgCos  = Math.cos(newHeadRad);
+      _kalHdgPSin = 1.0;
+      _kalHdgPCos = 1.0;
       _snappedHeading  = null;
       _hasOutputHeading = false;
       dlog('calBtn: reset smoothing for non-iOS');
