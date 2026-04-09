@@ -1019,23 +1019,28 @@ var deviceHeading = 0;
 var devicePitch = 0;
 var deviceRoll = 0;
 
-// Adaptive smoothing state for sensor noise reduction
+// Sensor fusion state
 var smoothHeadingSin = 0;
 var smoothHeadingCos = 1;
 var smoothPitch = 0;
 var smoothRoll = 0;
 var sensorInitialized = false;
-var lastRawHeading = 0;
-// Adaptive: k varies between min (stationary) and max (fast movement)
-var HEADING_K_MIN = 0.08;  // stationary: heavy smoothing
-var HEADING_K_MAX = 0.5;   // fast move: responsive but not instant
+// Gyroscope-assisted heading (P1: most impactful improvement)
+var gyroYawDelta = 0;           // accumulated gyro heading change (degrees)
+var lastStableHeading = 0;      // last compass heading at normal pitch
+var isSteepMode = false;        // currently in steep-pitch (gyro) mode?
+var lastGyroTime = 0;
+// Adaptive smoothing parameters
+var HEADING_K_MIN = 0.08;       // stationary: heavy smoothing
+var HEADING_K_MAX = 0.5;        // fast move: responsive
 var PITCH_K_MIN = 0.10;
 var PITCH_K_MAX = 0.6;
-var MOVE_THRESHOLD = 3;    // degrees of change below which we consider "stationary"
-var MOVE_SCALE = 15;       // degrees of change at which k reaches max
-// Compass becomes unreliable at steep pitch angles (gimbal lock region)
-var STEEP_PITCH_THRESHOLD = 60; // degrees from horizontal where compass degrades
-var HEADING_K_STEEP = 0.03;     // very heavy smoothing when looking up/down
+var MOVE_THRESHOLD = 3;
+var MOVE_SCALE = 15;
+// Steep pitch thresholds
+var STEEP_PITCH_ENTER = 55;     // enter gyro mode when elevation > this
+var STEEP_PITCH_EXIT = 45;      // exit gyro mode when elevation < this (hysteresis)
+var GYRO_DRIFT_CORRECTION = 0.002; // slow drift correction factor per compass event
 var cameraFOV = 65;
 var isRunning = false;
 var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
@@ -1067,9 +1072,11 @@ document.getElementById('startBtn').addEventListener('click', function() {
     dlog('startBtn: orientation permission result = ' + state);
     if (state === 'granted') {
       window.addEventListener('deviceorientation', handleOrientation, true);
+      window.addEventListener('devicemotion', handleGyro, true);
     } else if (state === 'not-needed') {
       dlog('startBtn: orientation permission not needed (non-iOS or legacy)');
       window.addEventListener('deviceorientation', handleOrientation, true);
+      window.addEventListener('devicemotion', handleGyro, true);
       if ('ondeviceorientationabsolute' in window) {
         window.addEventListener('deviceorientationabsolute', handleOrientation, true);
       }
@@ -1080,6 +1087,7 @@ document.getElementById('startBtn').addEventListener('click', function() {
   }).catch(function(err) {
     dlog('startBtn: orientation permission error: ' + (err.message || err) + ' (continuing anyway)');
     window.addEventListener('deviceorientation', handleOrientation, true);
+    window.addEventListener('devicemotion', handleGyro, true);
     return continueStartup();
   });
 
@@ -1153,19 +1161,75 @@ function requestGeolocation() {
 // Note: orientation permission is now handled directly in the click handler
 // to preserve user gesture context on iOS Safari.
 
+// Gyroscope handler: integrate rotation rate for heading hold at steep pitch
+function handleGyro(e) {
+  if (!e.rotationRate) return;
+  var now = performance.now();
+  var dt = lastGyroTime ? (now - lastGyroTime) / 1000 : 0;
+  lastGyroTime = now;
+  if (dt <= 0 || dt > 0.2) return; // skip stale or first reading
+
+  // Approximate body yaw from device rotation rates, accounting for phone tilt
+  // When phone is tilted backward, yaw maps to mix of alpha and gamma
+  var tiltRad = Math.max(0, 90 - devicePitch) * Math.PI / 180;
+  var yawRate = (e.rotationRate.alpha || 0) * Math.cos(tiltRad)
+              + (e.rotationRate.gamma || 0) * Math.sin(tiltRad);
+  // webkitCompassHeading is CW from north; rotationRate.alpha positive = CCW
+  gyroYawDelta -= yawRate * dt;
+}
+
 function handleOrientation(e) {
-  var heading = 0;
+  var compassHeading = 0;
   if (typeof e.webkitCompassHeading === 'number') {
-    heading = e.webkitCompassHeading;
+    compassHeading = e.webkitCompassHeading;
   } else if (e.absolute && typeof e.alpha === 'number') {
-    heading = 360 - e.alpha;
+    compassHeading = 360 - e.alpha;
   } else if (typeof e.alpha === 'number') {
-    heading = 360 - e.alpha;
+    compassHeading = 360 - e.alpha;
   }
   var pitch = e.beta || 0;
   var roll = e.gamma || 0;
+  var compassAccuracy = e.webkitCompassAccuracy || 999; // P0: iOS quality signal
 
-  // Low-pass filter to reduce sensor jitter
+  // Determine camera elevation
+  var deviceEl = 90 - pitch;
+
+  // Steep pitch detection with hysteresis
+  if (!isSteepMode && Math.abs(deviceEl) > STEEP_PITCH_ENTER) {
+    isSteepMode = true;
+    gyroYawDelta = 0; // reset gyro accumulator on entering steep mode
+    dlog('STEEP mode ON (el=' + deviceEl.toFixed(0) + ')');
+  } else if (isSteepMode && Math.abs(deviceEl) < STEEP_PITCH_EXIT) {
+    isSteepMode = false;
+    dlog('STEEP mode OFF (el=' + deviceEl.toFixed(0) + ')');
+  }
+
+  // Choose heading source based on steep mode
+  var heading;
+  if (isSteepMode) {
+    // Gyro-assisted: use last stable compass heading + accumulated gyro yaw
+    heading = lastStableHeading + gyroYawDelta;
+    // Normalize to 0-360
+    heading = ((heading % 360) + 360) % 360;
+    // Slow drift correction toward compass (only if compass accuracy is decent)
+    if (compassAccuracy < 50) {
+      var compassDiff = compassHeading - heading;
+      if (compassDiff > 180) compassDiff -= 360;
+      if (compassDiff < -180) compassDiff += 360;
+      // Very gentle correction — don't trust compass much at steep pitch
+      heading += compassDiff * GYRO_DRIFT_CORRECTION;
+      heading = ((heading % 360) + 360) % 360;
+      // Also slowly update gyroYawDelta so it converges
+      gyroYawDelta += compassDiff * GYRO_DRIFT_CORRECTION;
+    }
+  } else {
+    // Normal pitch — use compass with adaptive smoothing
+    heading = compassHeading;
+    lastStableHeading = compassHeading;
+    gyroYawDelta = 0;
+  }
+
+  // Low-pass filter
   var headRad = heading * Math.PI / 180;
   var rawSin = Math.sin(headRad);
   var rawCos = Math.cos(headRad);
@@ -1175,47 +1239,33 @@ function handleOrientation(e) {
     smoothHeadingCos = rawCos;
     smoothPitch = pitch;
     smoothRoll = roll;
-    lastRawHeading = heading;
+    lastStableHeading = compassHeading;
     sensorInitialized = true;
   } else {
-    // Compute how much the heading changed (angular distance)
     var prevHeading = Math.atan2(smoothHeadingSin, smoothHeadingCos) * 180 / Math.PI;
     if (prevHeading < 0) prevHeading += 360;
     var headingDelta = Math.abs(heading - prevHeading);
     if (headingDelta > 180) headingDelta = 360 - headingDelta;
-    var rawDelta = Math.abs(heading - lastRawHeading);
-    if (rawDelta > 180) rawDelta = 360 - rawDelta;
     var pitchDelta = Math.abs(pitch - smoothPitch);
-    lastRawHeading = heading;
 
-    // Detect steep pitch (phone pointing up/down) — compass is unreliable here
-    var absPitch = Math.abs(pitch);
-    var deviceEl = 90 - pitch; // approximate elevation the camera is pointing at
-    var isSteep = Math.abs(deviceEl) > STEEP_PITCH_THRESHOLD || absPitch < 30;
-
-    // Reject obvious compass glitches: >90° jump in one sensor event at steep angle
-    var isGlitch = headingDelta > 90 && isSteep;
-
+    // Adaptive k based on movement speed
     var headingK;
-    if (isGlitch) {
-      // Compass glitch at steep angle — ignore this reading almost entirely
-      headingK = 0.01;
-    } else if (isSteep) {
-      // Steep pitch — heavy smoothing since compass is noisy here
-      headingK = HEADING_K_STEEP;
+    if (isSteepMode) {
+      // In steep mode, gyro heading is already smooth — use moderate k
+      headingK = 0.15;
     } else {
-      // Normal range — adaptive smoothing based on movement speed
+      // P0: reduce k when compass accuracy is poor
+      var accuracyFactor = compassAccuracy > 30 ? 0.3 : 1.0;
       headingK = HEADING_K_MIN + (HEADING_K_MAX - HEADING_K_MIN) *
         Math.min(1, Math.max(0, (headingDelta - MOVE_THRESHOLD) / MOVE_SCALE));
+      headingK *= accuracyFactor;
     }
 
     var pitchK = PITCH_K_MIN + (PITCH_K_MAX - PITCH_K_MIN) *
       Math.min(1, Math.max(0, (pitchDelta - MOVE_THRESHOLD) / MOVE_SCALE));
 
-    // Sin/cos decomposition handles 0°/360° wraparound correctly
     smoothHeadingSin += headingK * (rawSin - smoothHeadingSin);
     smoothHeadingCos += headingK * (rawCos - smoothHeadingCos);
-    // EMA for pitch and roll
     smoothPitch += pitchK * (pitch - smoothPitch);
     smoothRoll += pitchK * (roll - smoothRoll);
   }
@@ -1688,7 +1738,7 @@ function updateOrientationDisplay() {
   headingBig.textContent = Math.round(deviceHeading) + '°';
   headingCard.textContent = headingToCardinal(deviceHeading);
   var devEl = 90 - devicePitch;
-  elevLabel.textContent = 'EL ' + Math.round(devEl) + '\u00B0 (p' + Math.round(devicePitch) + ')';
+  elevLabel.textContent = 'EL ' + Math.round(devEl) + '\u00B0' + (isSteepMode ? ' GYRO' : '');
 
   var tickWidth = 24;
   var barCenterOffset = compassBar.parentElement.offsetWidth / 2;
