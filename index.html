@@ -1174,7 +1174,7 @@ function handleGyro(e) {
   //   alpha_measured = world_yaw * cos(pitch)   [Z-axis component]
   //   gamma_measured = world_yaw * sin(pitch)   [Y-axis component]
   // So: world_yaw = alpha*cos(pitch) + gamma*sin(pitch)
-  var pitchRad = Math.max(0, Math.min(90, devicePitch)) * Math.PI / 180;
+  var pitchRad = devicePitch * Math.PI / 180;
   var yawRate = (e.rotationRate.alpha || 0) * Math.cos(pitchRad)
               + (e.rotationRate.gamma || 0) * Math.sin(pitchRad);
   // webkitCompassHeading is CW from north; rotationRate.alpha positive = CCW
@@ -1194,8 +1194,8 @@ function handleOrientation(e) {
   var roll = e.gamma || 0;
   var compassAccuracy = e.webkitCompassAccuracy || 999; // P0: iOS quality signal
 
-  // Determine camera elevation
-  var deviceEl = 90 - pitch;
+  // Camera elevation: beta=90°→horizon(0°), beta=180°→zenith(+90°), beta=0°→nadir(-90°)
+  var deviceEl = pitch - 90;
 
   // Steep pitch detection with hysteresis
   if (!isSteepMode && Math.abs(deviceEl) > STEEP_PITCH_ENTER) {
@@ -1607,8 +1607,8 @@ function placeSatMarker(sat, pos) {
   while (azDiff > 180) azDiff -= 360;
   while (azDiff < -180) azDiff += 360;
 
-  // devicePitch: 0°=flat, 90°=pointing up → camera elevation = 90 - devicePitch
-  var deviceElevation = 90 - devicePitch;
+  // devicePitch (=beta): 90°=vertical(horizon), 180°=zenith, 0°=nadir
+  var deviceElevation = devicePitch - 90;
   var elDiff = pos.elevation - deviceElevation;
 
   var screenW = window.innerWidth;
@@ -1650,7 +1650,7 @@ function placeEdgeIndicator(sat, pos, pass) {
 
   // 方位がほぼ合っている場合 → 画面中央にガイド表示
   if (Math.abs(azDiff) < halfFovH) {
-    var deviceElevation = 90 - devicePitch;
+    var deviceElevation = devicePitch - 90;
 
     var guide = document.createElement('div');
     guide.className = 'sat-guide';
@@ -1741,7 +1741,7 @@ function updateOrientationDisplay() {
 
   headingBig.textContent = Math.round(deviceHeading) + '°';
   headingCard.textContent = headingToCardinal(deviceHeading);
-  var devEl = 90 - devicePitch;
+  var devEl = devicePitch - 90;
   elevLabel.textContent = 'EL ' + Math.round(devEl) + '\u00B0' + (isSteepMode ? ' GYRO' : '');
 
   var tickWidth = 24;
