@@ -1206,7 +1206,13 @@ var _lastMarkerUpdateTs = 0;
 var _markerUpdateIntervalMs = 120;
 var MARKER_UPDATE_INTERVAL_MIN_MS = 70;
 var MARKER_UPDATE_INTERVAL_MAX_MS = 220;
-var MARKER_TARGET_ANGLE_DEG = 1.2;
+var MARKER_TARGET_ANGLE_DEG = 1.2;   // マーカー更新間で許容する角度変化量
+var MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC = 120;
+var MIN_ACTIVE_RATE_DEG_PER_SEC = 0.2;
+var HEADING_RATE_EMA_OLD_WEIGHT = 0.82;
+var HEADING_RATE_EMA_NEW_WEIGHT = 0.18;
+var SAT_MOTION_RATE_EMA_OLD_WEIGHT = 0.75;
+var SAT_MOTION_RATE_EMA_NEW_WEIGHT = 0.25;
 var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
@@ -1448,7 +1454,9 @@ function handleOrientation(e) {
   }
   heading = ((heading % 360) + 360) % 360;
   heading = getRobustHeadingFromWindow(heading);
-  _headingRateDegPerSec = _headingRateDegPerSec * 0.82 + alphaRateDegPerSec * 0.18;
+  _headingRateDegPerSec =
+    _headingRateDegPerSec * HEADING_RATE_EMA_OLD_WEIGHT +
+    alphaRateDegPerSec * HEADING_RATE_EMA_NEW_WEIGHT;
 
   // --- Elevation from pitch/roll ---
   var headRad = heading * Math.PI / 180;
@@ -1483,8 +1491,11 @@ function handleOrientation(e) {
 }
 
 function updateAdaptiveMarkerInterval(nowMs) {
-  var activeRate = Math.max(_satMotionRateDegPerSec, Math.min(_headingRateDegPerSec, 120));
-  if (!(activeRate > 0)) activeRate = 0.2;
+  var activeRate = Math.max(
+    _satMotionRateDegPerSec,
+    Math.min(_headingRateDegPerSec, MAX_HEADING_RATE_FOR_MARKER_UPDATE_DEG_PER_SEC)
+  );
+  if (!(activeRate > 0)) activeRate = MIN_ACTIVE_RATE_DEG_PER_SEC;
   var nextInterval = (MARKER_TARGET_ANGLE_DEG / activeRate) * 1000;
   if (nextInterval < MARKER_UPDATE_INTERVAL_MIN_MS) nextInterval = MARKER_UPDATE_INTERVAL_MIN_MS;
   if (nextInterval > MARKER_UPDATE_INTERVAL_MAX_MS) nextInterval = MARKER_UPDATE_INTERVAL_MAX_MS;
@@ -2216,7 +2227,9 @@ function updateSatMotionRate(now, satData) {
     };
   });
 
-  _satMotionRateDegPerSec = _satMotionRateDegPerSec * 0.75 + maxRate * 0.25;
+  _satMotionRateDegPerSec =
+    _satMotionRateDegPerSec * SAT_MOTION_RATE_EMA_OLD_WEIGHT +
+    maxRate * SAT_MOTION_RATE_EMA_NEW_WEIGHT;
 }
 
 // ============================================================
