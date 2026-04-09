@@ -637,6 +637,74 @@
     margin-top: 1px;
   }
 
+  .pass-forecast-panel {
+    margin-top: 12px;
+    border-top: 1px solid var(--grid);
+    padding-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .pass-forecast-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .pass-forecast-title {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .pass-forecast-select {
+    min-width: 120px;
+    max-width: 180px;
+    background: rgba(10, 14, 24, 0.9);
+    color: var(--ink);
+    border: 1px solid var(--grid);
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+  .pass-forecast-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--grid);
+  }
+  .pass-forecast-table {
+    width: 100%;
+    min-width: 420px;
+    border-collapse: collapse;
+    font-size: 9px;
+    color: var(--ink);
+  }
+  .pass-forecast-table thead th {
+    position: sticky;
+    top: 0;
+    background: rgba(5,8,18,0.98);
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    border-bottom: 1px solid var(--grid);
+    padding: 6px 7px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .pass-forecast-table td {
+    border-bottom: 1px solid rgba(245, 241, 230, 0.08);
+    padding: 6px 7px;
+    white-space: nowrap;
+    vertical-align: top;
+  }
+  .pass-forecast-table tr:last-child td { border-bottom: none; }
+  .pass-forecast-table td.max-el,
+  .pass-forecast-table td.duration { text-align: right; }
+  .pass-forecast-empty {
+    color: var(--ink-dim);
+    text-align: center;
+    padding: 10px 6px !important;
+  }
+
   .tle-footer {
     margin-top: 12px;
     padding-top: 10px;
@@ -855,6 +923,28 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
         <button class="drawer-close-btn" id="drawerCloseBtn">CLOSE</button>
       </div>
       <div id="satListCompact"></div>
+      <div class="pass-forecast-panel">
+        <div class="pass-forecast-header">
+          <span class="pass-forecast-title">7-Day Pass Forecast</span>
+          <select id="forecastSatSelect" class="pass-forecast-select" aria-label="Forecast satellite"></select>
+        </div>
+        <div class="pass-forecast-wrap">
+          <table class="pass-forecast-table">
+            <thead>
+              <tr>
+                <th>日付</th>
+                <th>開始</th>
+                <th>方角</th>
+                <th>最大迎角</th>
+                <th>時間</th>
+              </tr>
+            </thead>
+            <tbody id="passForecastBody">
+              <tr><td colspan="5" class="pass-forecast-empty">Loading forecast...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div class="tle-footer" id="tleFooter">
         TLE: <span id="tleAgeText">--</span>
         <button class="tle-refresh-btn" id="tleRefreshBtn">Refresh</button>
@@ -1086,6 +1176,8 @@ var nextPassCache = {}; // { noradId: { riseTime, maxEl, duration, azAtRise } }
 var trackedSats = {}; // { noradId: true/false } user-selected tracking
 var drawerOpen = false;
 var autoTrackedIds = []; // auto-selected: next 2 upcoming sats
+var selectedForecastNorad = TRACKED_SATS[0].norad;
+var weeklyPassCache = {}; // { noradId: { windowStartMs, computedAtMs, passes } }
 
 // ============================================================
 // スタート
@@ -1370,9 +1462,12 @@ function startTracking() {
   try { buildCompassBar(); } catch(e) { dlog('startTracking: buildCompassBar error: ' + e.message); }
   try { updateTleFooter(); } catch(e) { dlog('startTracking: updateTleFooter error: ' + e.message); }
   try { initPersistentElements(); } catch(e) { dlog('startTracking: initPersistentElements error: ' + e.message); }
+  try { initPassForecastPanel(); } catch(e) { dlog('startTracking: initPassForecastPanel error: ' + e.message); }
   try { render(); } catch(e) { dlog('startTracking: render error: ' + e.message); }
 
   try { computeNextPasses(); } catch(e) { dlog('startTracking: computeNextPasses error: ' + e.message); }
+  try { ensureWeeklyPassForecast(true); } catch(e) { dlog('startTracking: ensureWeeklyPassForecast error: ' + e.message); }
+  try { renderPassForecastTable(); } catch(e) { dlog('startTracking: renderPassForecastTable error: ' + e.message); }
 
   // CAL button: recalibrate compass offset from the latest raw magnetometer reading
   document.getElementById('calBtn').addEventListener('click', function() {
@@ -1399,6 +1494,12 @@ function startTracking() {
   setInterval(render, 1000);
   setInterval(updateTleFooter, 60000);
   setInterval(computeNextPasses, 60000);
+  setInterval(function() {
+    try {
+      ensureWeeklyPassForecast(true);
+      if (drawerOpen) renderPassForecastTable();
+    } catch(e) {}
+  }, 10 * 60 * 1000);
   requestAnimationFrame(updateOrientationDisplay);
 }
 
@@ -1421,6 +1522,194 @@ function computeSatPosition(sat, date) {
       rangeKm: look.rangeSat
     };
   } catch(e) { return null; }
+}
+
+function computeLookAnglesFromSatrec(satrec, date) {
+  try {
+    var pv = satellite.propagate(satrec, date);
+    if (!pv.position) return null;
+    var gmst = satellite.gstime(date);
+    var ecf = satellite.eciToEcf(pv.position, gmst);
+    var look = satellite.ecfToLookAngles(observer, ecf);
+    return {
+      azimuth: satellite.radiansToDegrees(look.azimuth),
+      elevation: satellite.radiansToDegrees(look.elevation),
+      rangeKm: look.rangeSat
+    };
+  } catch(e) {
+    return null;
+  }
+}
+
+function refineHorizonCrossingTime(satrec, lowTimeMs, highTimeMs) {
+  var low = lowTimeMs;
+  var high = highTimeMs;
+  for (var i = 0; i < 14; i++) {
+    var mid = Math.floor((low + high) / 2);
+    var look = computeLookAnglesFromSatrec(satrec, new Date(mid));
+    var el = look ? look.elevation : -90;
+    if (el > 0) high = mid; else low = mid;
+  }
+  return high;
+}
+
+function getTomorrowStart(date) {
+  var d = new Date(date.getTime());
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function formatPassDate(date) {
+  return date.toLocaleDateString('ja-JP', {
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short'
+  });
+}
+
+function formatPassTime(date) {
+  return date.toLocaleTimeString('ja-JP', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+}
+
+function computeWeeklyPassesForSatellite(norad) {
+  if (!observer) return [];
+  var tleData = tleDatabase[norad];
+  if (!tleData) return [];
+
+  var satrec;
+  try {
+    satrec = satellite.twoline2satrec(tleData.tle1, tleData.tle2);
+  } catch(e) {
+    return [];
+  }
+
+  var now = new Date();
+  var startDate = getTomorrowStart(now);
+  var endDate = new Date(startDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+  var stepMs = 30 * 1000;
+  var passes = [];
+
+  var prevTime = startDate.getTime();
+  var prevLook = computeLookAnglesFromSatrec(satrec, new Date(prevTime));
+  var prevEl = prevLook ? prevLook.elevation : -90;
+  var activePass = null;
+
+  if (prevEl > 0) {
+    activePass = {
+      riseTimeMs: prevTime,
+      riseAz: prevLook.azimuth,
+      maxEl: prevEl
+    };
+  }
+
+  for (var t = prevTime + stepMs; t <= endDate.getTime(); t += stepMs) {
+    var look = computeLookAnglesFromSatrec(satrec, new Date(t));
+    var el = look ? look.elevation : -90;
+
+    if (!activePass && prevEl <= 0 && el > 0) {
+      var riseMs = refineHorizonCrossingTime(satrec, t - stepMs, t);
+      var riseLook = computeLookAnglesFromSatrec(satrec, new Date(riseMs));
+      activePass = {
+        riseTimeMs: riseMs,
+        riseAz: riseLook ? riseLook.azimuth : (look ? look.azimuth : 0),
+        maxEl: Math.max(el, riseLook ? riseLook.elevation : el)
+      };
+    }
+
+    if (activePass) {
+      if (el > activePass.maxEl) activePass.maxEl = el;
+
+      if (prevEl > 0 && el <= 0) {
+        var setMs = refineHorizonCrossingTime(satrec, t - stepMs, t);
+        var setLook = computeLookAnglesFromSatrec(satrec, new Date(setMs));
+        var durationMin = Math.max(1, Math.round((setMs - activePass.riseTimeMs) / 60000));
+        passes.push({
+          riseTime: new Date(activePass.riseTimeMs),
+          setTime: new Date(setMs),
+          azAtRise: Math.round(activePass.riseAz),
+          azAtSet: Math.round(setLook ? setLook.azimuth : 0),
+          maxEl: Math.round(activePass.maxEl),
+          durationMin: durationMin
+        });
+        activePass = null;
+      }
+    }
+
+    prevEl = el;
+  }
+
+  return passes;
+}
+
+function ensureWeeklyPassForecast(forceRefresh) {
+  var norad = selectedForecastNorad;
+  if (!norad) return;
+  var now = Date.now();
+  var tomorrowStartMs = getTomorrowStart(new Date(now)).getTime();
+  var cached = weeklyPassCache[norad];
+  var cacheValid = cached &&
+    cached.windowStartMs === tomorrowStartMs &&
+    (now - cached.computedAtMs) < (10 * 60 * 1000);
+
+  if (!forceRefresh && cacheValid) return;
+
+  weeklyPassCache[norad] = {
+    windowStartMs: tomorrowStartMs,
+    computedAtMs: now,
+    passes: computeWeeklyPassesForSatellite(norad)
+  };
+}
+
+function renderPassForecastTable() {
+  var tbody = document.getElementById('passForecastBody');
+  var select = document.getElementById('forecastSatSelect');
+  if (!tbody || !select) return;
+
+  if (select.value !== String(selectedForecastNorad)) {
+    select.value = String(selectedForecastNorad);
+  }
+
+  ensureWeeklyPassForecast(false);
+  var cache = weeklyPassCache[selectedForecastNorad];
+  var passes = cache ? cache.passes : [];
+
+  if (!passes || passes.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="pass-forecast-empty">翌日以降7日間のパスはありません</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = passes.map(function(pass) {
+    var fromDir = headingToCardinal(pass.azAtRise);
+    var toDir = headingToCardinal(pass.azAtSet);
+    return '<tr>' +
+      '<td>' + formatPassDate(pass.riseTime) + '</td>' +
+      '<td>' + formatPassTime(pass.riseTime) + '</td>' +
+      '<td>' + fromDir + ' ' + pass.azAtRise + '° → ' + toDir + ' ' + pass.azAtSet + '°</td>' +
+      '<td class="max-el">' + pass.maxEl + '°</td>' +
+      '<td class="duration">' + pass.durationMin + '分</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function initPassForecastPanel() {
+  var select = document.getElementById('forecastSatSelect');
+  if (!select) return;
+
+  select.innerHTML = TRACKED_SATS.map(function(sat) {
+    return '<option value="' + sat.norad + '">' + sat.displayName + '</option>';
+  }).join('');
+  select.value = String(selectedForecastNorad);
+
+  select.addEventListener('change', function() {
+    selectedForecastNorad = parseInt(this.value, 10);
+    ensureWeeklyPassForecast(true);
+    renderPassForecastTable();
+  });
 }
 
 // ============================================================
@@ -1703,6 +1992,7 @@ function render() {
         this.classList.toggle('active');
       });
     });
+    renderPassForecastTable();
   }
 
   // ---- マーカーラベルの仰角を更新（位置更新はrAFで行う） ----
@@ -2047,6 +2337,7 @@ function updateTleFooter() {
 document.getElementById('menuToggleBtn').addEventListener('click', function() {
   drawerOpen = true;
   document.getElementById('satDrawer').classList.add('open');
+  renderPassForecastTable();
 });
 document.getElementById('drawerCloseBtn').addEventListener('click', function() {
   drawerOpen = false;
@@ -2059,6 +2350,9 @@ document.getElementById('tleRefreshBtn').addEventListener('click', async functio
   btn.disabled = true;
   try {
     await fetchFreshTLEs();
+    weeklyPassCache = {};
+    ensureWeeklyPassForecast(true);
+    renderPassForecastTable();
     updateTleFooter();
     btn.textContent = 'Refreshed';
     setTimeout(function() { btn.textContent = 'Refresh'; btn.disabled = false; }, 1500);
