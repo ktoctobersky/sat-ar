@@ -262,6 +262,8 @@
   }
   .cal-btn:active { background: rgba(244, 197, 107, 0.15); color: var(--accent); }
   .cal-btn.flash { color: var(--accent); border-color: var(--accent); }
+  .cal-btn.init  { color: var(--accent); border-color: var(--accent); animation: calBlink 0.7s step-end infinite; }
+  @keyframes calBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
   .hud-compass .big {
     font-size: 22px;
     color: var(--accent);
@@ -1180,14 +1182,19 @@ var ORIENTATION_DT_MAX_SEC = 0.2;
 var HEADING_TRIM_MIN_SAMPLES = 5;    // 5〜7サンプル窓でトリム平均を有効化
 var HEADING_TRIM_COUNT = 1;          // 両端1サンプル除去
 var CAL_ALPHA_MAX_AGE_MS = 2000;
-var MAG_CORR_STRONG_RATE_MAX = 35;
-var MAG_CORR_STRONG_RESIDUAL_MAX = 35;
-var MAG_CORR_MEDIUM_RESIDUAL_MAX = 60;
-var MAG_CORR_WEAK_RATE_MAX = 80;
-var MAG_CORR_WEAK_RESIDUAL_MAX = 25;
-var MAG_CORR_GAIN_STRONG = 0.06;
-var MAG_CORR_GAIN_MEDIUM = 0.02;
-var MAG_CORR_GAIN_WEAK = 0.01;
+// Compass init phase: collect (alpha, webkitCompassHeading) pairs for
+// INIT_COLLECTION_MS to compute a stable circular-mean compassOffset, then
+// run gyro-primary (OS-fused alpha + fixed offset) with no continuous
+// magnetometer correction.  webkitCompassHeading fluctuates ±2-5° even
+// when stationary, so feeding it back continuously injects noise into the
+// offset and causes visible heading jitter.  A one-time averaged offset lets
+// Apple's CoreMotion gyro/accel/mag fusion drive the heading cleanly.
+var INIT_COLLECTION_MS = 1500;   // collect samples for 1.5 s
+var INIT_MIN_SAMPLES   = 15;     // require at least this many valid samples
+var _initPhase         = 'waiting'; // 'waiting' | 'collecting' | 'done'
+var _initStartTs       = 0;
+var _initOffsetSins    = [];
+var _initOffsetCoss    = [];
 var HEADING_EMA_RATE_FAST = 90;
 var HEADING_EMA_RATE_MID = 40;
 var HEADING_EMA_K_FAST = 0.30;
@@ -1406,31 +1413,44 @@ function handleOrientation(e) {
 
   var heading;
   if (alphaHeading !== null && rawCompass !== null) {
-    // iOS: alpha is relative → calibrate with compassOffset (seed + adaptive correction)
-    if (!_emaInited) {
-      // First sample: seed the offset from the raw compass so we start pointing north
-      compassOffset = rawCompass - alphaHeading;
-      if (compassOffset > 180) compassOffset -= 360;
-      if (compassOffset < -180) compassOffset += 360;
+    // iOS: alpha is relative → calibrate with compassOffset.
+    // Phase 1 (collecting): gather samples and compute a circular-mean offset.
+    // Phase 2 (done): pure gyro-primary — OS-fused alpha + fixed offset, no correction.
+    if (_initPhase === 'waiting') {
+      _initPhase   = 'collecting';
+      _initStartTs = Date.now();
+    }
+    if (_initPhase === 'collecting') {
+      var offsetDeg = rawCompass - alphaHeading;
+      _initOffsetSins.push(Math.sin(offsetDeg * Math.PI / 180));
+      _initOffsetCoss.push(Math.cos(offsetDeg * Math.PI / 180));
+      var initElapsed = Date.now() - _initStartTs;
+      if (initElapsed >= INIT_COLLECTION_MS && _initOffsetSins.length >= INIT_MIN_SAMPLES) {
+        var n = _initOffsetSins.length;
+        var avgSin = 0, avgCos = 0;
+        for (var si = 0; si < n; si++) {
+          avgSin += _initOffsetSins[si];
+          avgCos += _initOffsetCoss[si];
+        }
+        compassOffset    = Math.atan2(avgSin / n, avgCos / n) * 180 / Math.PI;
+        _initPhase       = 'done';
+        _initOffsetSins  = [];
+        _initOffsetCoss  = [];
+        _headingWindow   = [];
+        _hasOutputHeading = false;
+        _snappedHeading  = null;
+        dlog('compassOffset init done: ' + compassOffset.toFixed(1) + '\u00b0 from ' + n + ' samples');
+      }
+      // During collection use rawCompass for display (acceptable for 1.5 s).
+      heading = rawCompass;
     } else {
+      // Gyro-primary: OS-fused alpha + fixed offset, no ongoing correction.
       if (_lastAlphaHeading !== null) {
         alphaRateDegPerSec = computeAlphaRate(alphaHeading, dtSec);
       }
-      var predicted = ((alphaHeading + compassOffset) % 360 + 360) % 360;
-      var residual = normalizeAzDiff(rawCompass - predicted);
-      var residualAbs = Math.abs(residual);
-      var correctionGain = 0;
-      if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_STRONG_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_STRONG;
-      else if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_MEDIUM_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_MEDIUM;
-      else if (alphaRateDegPerSec < MAG_CORR_WEAK_RATE_MAX && residualAbs < MAG_CORR_WEAK_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_WEAK;
-      if (correctionGain > 0) {
-        compassOffset += residual * correctionGain;
-        if (compassOffset > 180) compassOffset -= 360;
-        if (compassOffset < -180) compassOffset += 360;
-      }
+      heading = alphaHeading + compassOffset;
     }
-    heading = alphaHeading + compassOffset;
-    _lastAlphaHeading = alphaHeading;
+    _lastAlphaHeading  = alphaHeading;
     _lastAlphaUpdatedTs = Date.now();
   } else if (e.absolute && alphaHeading !== null) {
     // Android absolute: alpha IS the compass heading
@@ -1468,7 +1488,14 @@ function handleOrientation(e) {
 
   // --- EMA update (AR.js style: k=0.15, angle-wrap-aware) ---
   if (!_emaInited) {
-    // Seed EMA with first sample to avoid cold-start lag
+    // For iOS: skip seeding while collecting init samples — heading is rawCompass
+    // (noisy) at that point.  Seed on the first event after init phase completes.
+    if (_initPhase === 'collecting') {
+      deviceHeading   = ((heading % 360) + 360) % 360;
+      deviceElevation = rawElevation;
+      return;
+    }
+    // Seed EMA with first good sample to avoid cold-start lag
     _emaHdgSin = rawSin;
     _emaHdgCos = rawCos;
     _emaElev   = rawElevation;
@@ -1629,22 +1656,27 @@ function startTracking() {
   // CAL button: recalibrate compass offset from the latest raw magnetometer reading
   document.getElementById('calBtn').addEventListener('click', function() {
     var btn = this;
-    if (_lastRawCompass !== null && _emaInited && _lastAlphaHeading !== null &&
-        (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
-      // Compute the current alpha-based heading (without any offset)
-      var alphaHeadingForCal = _lastAlphaHeading;
-      var newOffset = _lastRawCompass - alphaHeadingForCal;
-      if (newOffset > 180) newOffset -= 360;
-      if (newOffset < -180) newOffset += 360;
-      compassOffset = newOffset;
-      // Re-seed EMA so the new absolute heading takes effect immediately
-      var newHeadRad = ((((alphaHeadingForCal + compassOffset) % 360) + 360) % 360) * Math.PI / 180;
-      _emaHdgSin = Math.sin(newHeadRad);
-      _emaHdgCos = Math.cos(newHeadRad);
-      _snappedHeading = null;
-      _headingWindow = [];
+    if (_lastRawCompass !== null) {
+      // iOS: restart the init phase to collect a fresh circular-mean compassOffset.
+      _initPhase       = 'collecting';
+      _initStartTs     = Date.now();
+      _initOffsetSins  = [];
+      _initOffsetCoss  = [];
+      _emaInited       = false;
+      _snappedHeading  = null;
+      _headingWindow   = [];
       _hasOutputHeading = false;
-      dlog('calBtn: reseeded compassOffset=' + compassOffset.toFixed(1));
+      dlog('calBtn: restarted init phase');
+    } else if (_emaInited && _lastAlphaHeading !== null &&
+               (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
+      // Non-iOS fallback: reset smoothing state to re-seed from current heading.
+      var newHeadRad = ((_lastAlphaHeading % 360 + 360) % 360) * Math.PI / 180;
+      _emaHdgSin      = Math.sin(newHeadRad);
+      _emaHdgCos      = Math.cos(newHeadRad);
+      _snappedHeading  = null;
+      _headingWindow   = [];
+      _hasOutputHeading = false;
+      dlog('calBtn: reset smoothing for non-iOS');
     }
     // Flash the button to give tactile feedback
     btn.classList.add('flash');
@@ -2517,6 +2549,14 @@ function updateOrientationDisplay() {
   headingCard.textContent = headingToCardinal(deviceHeading);
   var devEl = deviceElevation;
   elevLabel.textContent = 'EL ' + Math.round(devEl) + '\u00B0';
+
+  // Show init indicator on CAL button while collecting compass samples
+  var calBtn = document.getElementById('calBtn');
+  if (_initPhase === 'collecting') {
+    calBtn.classList.add('init');
+  } else {
+    calBtn.classList.remove('init');
+  }
 
   var tickWidth = 24;
   var barCenterOffset = compassBar.parentElement.offsetWidth / 2;
