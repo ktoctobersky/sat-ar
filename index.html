@@ -1175,12 +1175,9 @@ var _emaInited = false; // seed first sample directly to avoid cold-start lag
 var HEADING_SNAP_STEP_DEG = 3;       // 3度単位で方位を量子化（ジッター抑制）
 var HEADING_SNAP_HYST_DEG = 1.2;     // 境界付近の行き来を防ぐヒステリシス
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
-var HEADING_WINDOW_SIZE = 7;         // 方位の短窓ロバスト平均
 var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 実回転は追従しつつ、瞬間ジャンプのみ抑制
 var ORIENTATION_DT_DEFAULT_SEC = 1 / 60;
 var ORIENTATION_DT_MAX_SEC = 0.2;
-var HEADING_TRIM_MIN_SAMPLES = 5;    // 5〜7サンプル窓でトリム平均を有効化
-var HEADING_TRIM_COUNT = 1;          // 両端1サンプル除去
 var CAL_ALPHA_MAX_AGE_MS = 2000;
 // Compass init phase: collect (alpha, webkitCompassHeading) pairs for
 // INIT_COLLECTION_MS to compute a stable circular-mean compassOffset, then
@@ -1199,7 +1196,6 @@ var HEADING_EMA_RATE_FAST = 90;
 var HEADING_EMA_RATE_MID = 40;
 var HEADING_EMA_K_FAST = 0.30;
 var HEADING_EMA_K_MID = 0.22;
-var _headingWindow = [];
 var _lastOrientationTs = 0;
 var _lastAlphaHeading = null;
 var _lastAlphaUpdatedTs = 0;
@@ -1436,7 +1432,6 @@ function handleOrientation(e) {
         _initPhase       = 'done';
         _initOffsetSins  = [];
         _initOffsetCoss  = [];
-        _headingWindow   = [];
         _hasOutputHeading = false;
         _snappedHeading  = null;
         dlog('compassOffset init done: ' + compassOffset.toFixed(1) + '\u00b0 from ' + n + ' samples');
@@ -1473,7 +1468,6 @@ function handleOrientation(e) {
     heading = 0;
   }
   heading = ((heading % 360) + 360) % 360;
-  heading = getRobustHeadingFromWindow(heading);
   _headingRateDegPerSec =
     _headingRateDegPerSec * HEADING_RATE_EMA_OLD_WEIGHT +
     alphaRateDegPerSec * HEADING_RATE_EMA_NEW_WEIGHT;
@@ -1486,7 +1480,23 @@ function handleOrientation(e) {
   var rRad = roll * Math.PI / 180;
   var rawElevation = Math.asin(Math.max(-1, Math.min(1, -Math.cos(pRad) * Math.cos(rRad)))) * 180 / Math.PI;
 
-  // --- EMA update (AR.js style: k=0.15, angle-wrap-aware) ---
+  // --- EMA update (adaptive-k, angle-wrap-aware; primary smoothing stage) ---
+  // iOS alpha is already OS-fused (CoreMotion Kalman: gyro+accel+mag), so a
+  // single adaptive EMA is the correct first smoother.  A prior sliding-window
+  // trimmed-mean was removed: it was a second smoothing pass on data that is
+  // already fusion-smoothed, adding ~50 ms of unnecessary lag at 60 Hz.
+  //
+  // Heading stabilisation strategy survey (5 methods evaluated):
+  //  ① Adaptive angular EMA (sin/cos) — ADOPTED: wrap-safe, tunable lag,
+  //     ideal for OS-fused sources.
+  //  ② Sliding-window trimmed mean — REMOVED: redundant after OS fusion;
+  //     adds fixed N/2-sample delay with no accuracy gain.
+  //  ③ Complementary filter (high-pass gyro + low-pass mag) — N/A: the OS
+  //     already performs this split inside CoreMotion/Android fusion.
+  //  ④ Extended Kalman Filter — N/A: iOS CoreMotion is itself a KF; applying
+  //     another KF on top is overkill and fights the OS estimate.
+  //  ⑤ Quantization + hysteresis — ADOPTED as output stage: eliminates
+  //     micro-jitter without adding sensor lag.
   if (!_emaInited) {
     // For iOS: skip seeding while collecting init samples — heading is rawCompass
     // (noisy) at that point.  Seed on the first event after init phase completes.
@@ -1530,27 +1540,6 @@ function updateAdaptiveMarkerInterval(nowMs) {
   if (nextInterval > MARKER_UPDATE_INTERVAL_MAX_MS) nextInterval = MARKER_UPDATE_INTERVAL_MAX_MS;
   _markerUpdateIntervalMs = nextInterval;
   if (_lastMarkerUpdateTs === 0) _lastMarkerUpdateTs = nowMs;
-}
-
-function getRobustHeadingFromWindow(heading) {
-  _headingWindow.push(heading);
-  if (_headingWindow.length > HEADING_WINDOW_SIZE) _headingWindow.shift();
-  if (_headingWindow.length < 3) return heading;
-
-  var anchor = _headingWindow[_headingWindow.length - 1];
-  var diffs = _headingWindow.map(function(h) {
-    return normalizeAzDiff(h - anchor);
-  }).sort(function(a, b) { return a - b; });
-
-  var trim = diffs.length >= HEADING_TRIM_MIN_SAMPLES ? HEADING_TRIM_COUNT : 0;
-  var sum = 0;
-  var count = 0;
-  for (var i = trim; i < diffs.length - trim; i++) {
-    sum += diffs[i];
-    count++;
-  }
-  if (count === 0) return anchor;
-  return ((anchor + (sum / count)) % 360 + 360) % 360;
 }
 
 function computeAlphaRate(alphaHeading, dtSec) {
@@ -1664,7 +1653,6 @@ function startTracking() {
       _initOffsetCoss  = [];
       _emaInited       = false;
       _snappedHeading  = null;
-      _headingWindow   = [];
       _hasOutputHeading = false;
       dlog('calBtn: restarted init phase');
     } else if (_emaInited && _lastAlphaHeading !== null &&
@@ -1674,7 +1662,6 @@ function startTracking() {
       _emaHdgSin      = Math.sin(newHeadRad);
       _emaHdgCos      = Math.cos(newHeadRad);
       _snappedHeading  = null;
-      _headingWindow   = [];
       _hasOutputHeading = false;
       dlog('calBtn: reset smoothing for non-iOS');
     }
