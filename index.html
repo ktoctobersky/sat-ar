@@ -1174,12 +1174,25 @@ var HEADING_SNAP_HYST_DEG = 1.5;     // 境界付近の行き来を防ぐヒス�
 var _snappedHeading = null;          // ヒステリシス付きスナップ後の方位
 var HEADING_WINDOW_SIZE = 7;         // 方位の短窓ロバスト平均
 var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 出力方位の最大追従速度
+var HEADING_TRIM_MIN_SAMPLES = 5;    // トリム平均を有効化する最小サンプル数
+var MAG_CORR_STRONG_RATE_MAX = 35;
+var MAG_CORR_STRONG_RESIDUAL_MAX = 35;
+var MAG_CORR_MEDIUM_RESIDUAL_MAX = 60;
+var MAG_CORR_WEAK_RATE_MAX = 80;
+var MAG_CORR_WEAK_RESIDUAL_MAX = 25;
+var MAG_CORR_GAIN_STRONG = 0.06;
+var MAG_CORR_GAIN_MEDIUM = 0.02;
+var MAG_CORR_GAIN_WEAK = 0.01;
+var HEADING_EMA_RATE_FAST = 90;
+var HEADING_EMA_RATE_MID = 40;
+var HEADING_EMA_K_FAST = 0.30;
+var HEADING_EMA_K_MID = 0.22;
 var _headingWindow = [];
 var _lastOrientationTs = 0;
 var _lastAlphaHeading = null;
 var _hasOutputHeading = false;
 var _lastOutputHeading = 0;
-var GOOD_PASS_ELEVATION_DEG = 60;
+var GOOD_PASS_ELEVATION_DEG = 60;    // 高仰角で見通しが良い目安
 // Heading strategy: use OS-fused alpha (gyro-driven, smooth) as the primary source.
 // compassOffset is set ONCE at startup (or on CAL button press) from webkitCompassHeading
 // to convert the relative alpha into an absolute (true-north) heading.
@@ -1386,9 +1399,9 @@ function handleOrientation(e) {
       var residual = normalizeAzDiff(rawCompass - predicted);
       var residualAbs = Math.abs(residual);
       var correctionGain = 0;
-      if (alphaRateDegPerSec < 35 && residualAbs < 35) correctionGain = 0.06;
-      else if (alphaRateDegPerSec < 35 && residualAbs < 60) correctionGain = 0.02;
-      else if (alphaRateDegPerSec < 80 && residualAbs < 25) correctionGain = 0.01;
+      if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_STRONG_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_STRONG;
+      else if (alphaRateDegPerSec < MAG_CORR_STRONG_RATE_MAX && residualAbs < MAG_CORR_MEDIUM_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_MEDIUM;
+      else if (alphaRateDegPerSec < MAG_CORR_WEAK_RATE_MAX && residualAbs < MAG_CORR_WEAK_RESIDUAL_MAX) correctionGain = MAG_CORR_GAIN_WEAK;
       if (correctionGain > 0) {
         compassOffset += residual * correctionGain;
         if (compassOffset > 180) compassOffset -= 360;
@@ -1435,8 +1448,8 @@ function handleOrientation(e) {
     _emaInited = true;
   } else {
     var headingK = EMA_K;
-    if (alphaRateDegPerSec > 90) headingK = 0.30;
-    else if (alphaRateDegPerSec > 40) headingK = 0.22;
+    if (alphaRateDegPerSec > HEADING_EMA_RATE_FAST) headingK = HEADING_EMA_K_FAST;
+    else if (alphaRateDegPerSec > HEADING_EMA_RATE_MID) headingK = HEADING_EMA_K_MID;
     _emaHdgSin = (1 - headingK) * _emaHdgSin + headingK * rawSin;
     _emaHdgCos = (1 - headingK) * _emaHdgCos + headingK * rawCos;
     _emaElev   = (1 - EMA_K) * _emaElev   + EMA_K * rawElevation;
@@ -1460,7 +1473,7 @@ function getRobustHeadingFromWindow(heading) {
     return normalizeAzDiff(h - anchor);
   }).sort(function(a, b) { return a - b; });
 
-  var trim = diffs.length >= 5 ? 1 : 0;
+  var trim = diffs.length >= HEADING_TRIM_MIN_SAMPLES ? 1 : 0;
   var sum = 0;
   var count = 0;
   for (var i = trim; i < diffs.length - trim; i++) {
