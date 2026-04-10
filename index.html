@@ -868,6 +868,80 @@
     50% { opacity: 1; border-width: 2px; }
   }
 
+  /* Below-horizon sats: distinct visual grammar (dashed/hollow/muted) */
+  .sat-guide.below-horizon {
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-style: dashed !important;
+    border-color: rgba(180, 180, 200, 0.6) !important;
+    color: rgba(220, 220, 230, 0.8) !important;
+    animation: none;
+  }
+  .sat-guide.below-horizon .guide-arrow { opacity: 0.65; }
+  .sat-guide.below-horizon .guide-detail { opacity: 0.7; }
+  .sat-edge-indicator.below-horizon {
+    border-style: dashed !important;
+    opacity: 0.75;
+  }
+
+  /* Horizon line: persistent reference across AR view */
+  #horizonLine {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 1px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.4);
+    pointer-events: none;
+    z-index: 4;
+    will-change: transform;
+  }
+  #horizonLine::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 1px;
+    height: 50px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.22), rgba(0,0,0,0));
+    pointer-events: none;
+  }
+  .horizon-label {
+    position: absolute;
+    left: 12px;
+    top: -8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: rgba(255, 255, 255, 0.55);
+    background: rgba(0, 0, 0, 0.4);
+    padding: 1px 6px;
+    border-radius: 2px;
+  }
+
+  /* Indoor compass warning banner */
+  #compassWarning {
+    position: absolute;
+    top: 140px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255, 140, 0, 0.18);
+    border: 1px solid rgba(255, 140, 0, 0.6);
+    color: rgba(255, 200, 120, 0.95);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    padding: 6px 14px;
+    border-radius: 4px;
+    pointer-events: none;
+    z-index: 20;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    white-space: nowrap;
+  }
+  #compassWarning .warn-icon { margin-right: 6px; font-size: 12px; }
+
   .error-toast {
     position: absolute;
     top: 50%;
@@ -976,7 +1050,13 @@ dlog('Boot: iOS=' + /iPhone|iPad|iPod/.test(navigator.userAgent) + ' UA=' + navi
     <div class="crosshair"></div>
     <div class="crosshair-center"></div>
 
+    <div id="horizonLine" style="display:none"><span class="horizon-label">HORIZON</span></div>
     <div id="markerLayer"></div>
+
+    <div id="compassWarning" style="display:none">
+      <span class="warn-icon">&#9888;</span>
+      <span class="warn-text">屋内の磁気干渉で方位が不安定です</span>
+    </div>
 
     <div id="initOverlay">
       <div class="init-banner">
@@ -1335,6 +1415,7 @@ var INDICATOR_MAX_SLOTS   = 3;      // 折り返し前の最大スロット数
 // is too noisy and causes visible arc jitter even when the device is stationary.
 var compassOffset = 0;          // converts OS-fused alpha to absolute heading
 var _lastRawCompass = null;     // most recent webkitCompassHeading, used by CAL button
+var _badAccSince = 0;           // timestamp (ms) when compass accuracy first went bad
 var satPositions = {};  // { norad: { azimuth, elevation, rangeKm } } - 1秒ごとに更新
 var satDataCache = [];  // sorted satData array - 1秒ごとに更新、rAFで参照
 var markerEls = {};     // { norad: { marker, edge, guide, svg, pastPath, futurePath } } - 永続DOM要素
@@ -1506,6 +1587,14 @@ function handleOrientation(e) {
   _lastOrientationTs = nowTs;
   if (!(dtSec > 0)) dtSec = ORIENTATION_DT_DEFAULT_SEC;
   if (dtSec > ORIENTATION_DT_MAX_SEC) dtSec = ORIENTATION_DT_MAX_SEC;
+
+  // Track indoor compass accuracy degradation for warning banner
+  var _compAcc = (typeof e.webkitCompassAccuracy === 'number') ? e.webkitCompassAccuracy : -1;
+  if (_compAcc >= 0 && _compAcc > 30) {
+    if (_badAccSince === 0) _badAccSince = performance.now();
+  } else if (_compAcc >= 0 && _compAcc <= 25) {
+    _badAccSince = 0;
+  }
 
   // --- Heading ---
   var alphaHeading = null; // OS-fused heading (CW, relative on iOS / absolute on Android)
@@ -2581,6 +2670,18 @@ function positionMarkersAndEdges() {
   var visSlotIndex = 0;    // 可視衛星（地平線上）のスロット番号
   var belowSlotIndex = 0;  // 非可視衛星（地平線下）のスロット番号
 
+  // Draw horizon line at elevation 0 projected onto screen
+  var horizonY = screenH / 2 - (-deviceElevation / halfFovV) * (screenH / 2);
+  var horizonEl = document.getElementById('horizonLine');
+  if (horizonEl) {
+    if (horizonY > -60 && horizonY < screenH + 60) {
+      horizonEl.style.display = '';
+      horizonEl.style.transform = 'translateY(' + horizonY.toFixed(1) + 'px)';
+    } else {
+      horizonEl.style.display = 'none';
+    }
+  }
+
   satDataCache.forEach(function(item) {
     var sat = item.sat;
     var pos = satPositions[sat.norad];
@@ -2620,6 +2721,9 @@ function positionMarkersAndEdges() {
 
         if (Math.abs(edgeAzDiff) < halfFovH) {
           // 方位が合っている → ガイド表示（仰角方向を誘導）
+          // Visual grammar: visible=solid/animated, below-horizon=dashed/muted
+          if (visible) elems.guide.classList.remove('below-horizon');
+          else elems.guide.classList.add('below-horizon');
           var xPercent = 50 + (edgeAzDiff / halfFovH) * 50;
           var arrowSymbol, elHint;
           if (visible) {
@@ -2661,6 +2765,9 @@ function positionMarkersAndEdges() {
         } else {
           // 方位がずれている → 画面端にエッジインジケータ
           var arrow = edgeAzDiff < 0 ? '\u25C0' : '\u25B6';
+          // Visual grammar: visible=solid, below-horizon=dashed/muted
+          if (visible) elems.edge.classList.remove('below-horizon');
+          else elems.edge.classList.add('below-horizon');
           // 可視衛星は上半分、非可視衛星は下半分に配置してひと目で分かるようにする
           var yBase;
           if (visible) {
@@ -2789,6 +2896,13 @@ function updateOrientationDisplay() {
   } else {
     calBtn.classList.remove('init');
     if (initOverlay) initOverlay.classList.remove('active');
+  }
+
+  // Indoor compass warning: shown when accuracy has been degraded >2s
+  var warnEl = document.getElementById('compassWarning');
+  if (warnEl) {
+    var showWarn = _badAccSince > 0 && (performance.now() - _badAccSince > 2000);
+    warnEl.style.display = showWarn ? '' : 'none';
   }
 
   var tickWidth = 24;
