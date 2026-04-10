@@ -1756,12 +1756,14 @@ function updateOrbitViewpoint() {
 
   var hdgDiff = normalizeAzDiff(deviceHeading - _orbitViewHeading);
   if (Math.abs(hdgDiff) >= ORBIT_HEADING_DEADBAND_DEG) {
-    _orbitViewHeading = ((_orbitViewHeading + hdgDiff * ORBIT_HEADING_EMA_K) + 360) % 360;
+    _orbitViewHeading = ((_orbitViewHeading + hdgDiff * ORBIT_HEADING_EMA_K) % 360 + 360) % 360;
   }
 
   var elDiff = deviceElevation - _orbitViewElevation;
   if (Math.abs(elDiff) >= ORBIT_ELEVATION_DEADBAND_DEG) {
     _orbitViewElevation += elDiff * ORBIT_ELEVATION_EMA_K;
+    if (_orbitViewElevation > 90)  _orbitViewElevation = 90;
+    if (_orbitViewElevation < -90) _orbitViewElevation = -90;
   }
 }
 
