@@ -1267,6 +1267,10 @@ var GYRO_STATIONARY_THRESHOLD_DPS = 1.2;
 var GYRO_MOVING_THRESHOLD_DPS = 3.5;
 var HEADING_HOLD_CAPTURE_DELAY_MS = 180;
 var HEADING_HOLD_RELEASE_DELTA_DEG = 3.5;
+var ORBIT_VIEW_HEADING_EMA = 0.12;
+var ORBIT_VIEW_ELEVATION_EMA = 0.16;
+var ORBIT_VIEW_HEADING_DEADBAND_DEG = 1.5;
+var ORBIT_VIEW_ELEVATION_DEADBAND_DEG = 1.0;
 // Compass init phase: collect (alpha, webkitCompassHeading) pairs for
 // INIT_COLLECTION_MS to compute a stable circular-mean compassOffset, then
 // run gyro-primary (OS-fused alpha + fixed offset) with no continuous
@@ -1291,6 +1295,9 @@ var _gyroMotionRateDegPerSec = 0;
 var _gyroStationarySinceTs = 0;
 var _headingHoldActive = false;
 var _heldHeading = 0;
+var _orbitViewHeading = 0;
+var _orbitViewElevation = 0;
+var _orbitViewInited = false;
 var _satMotionRateDegPerSec = 0;
 var _lastSatMotionSampleTs = 0;
 var _satMotionSamples = {};          // { norad: { azimuth, elevation } }
@@ -1692,6 +1699,29 @@ function computeAlphaRate(alphaHeading, dtSec) {
   return Math.abs(normalizeAzDiff(alphaHeading - _lastAlphaHeading)) / dtSec;
 }
 
+function blendAngleDeg(current, target, weight) {
+  return ((current + normalizeAzDiff(target - current) * weight) % 360 + 360) % 360;
+}
+
+function updateOrbitViewOrientation() {
+  if (!_orbitViewInited) {
+    _orbitViewHeading = deviceHeading;
+    _orbitViewElevation = deviceElevation;
+    _orbitViewInited = true;
+    return;
+  }
+
+  var headingDelta = normalizeAzDiff(deviceHeading - _orbitViewHeading);
+  if (Math.abs(headingDelta) >= ORBIT_VIEW_HEADING_DEADBAND_DEG) {
+    _orbitViewHeading = blendAngleDeg(_orbitViewHeading, deviceHeading, ORBIT_VIEW_HEADING_EMA);
+  }
+
+  var elevationDelta = deviceElevation - _orbitViewElevation;
+  if (Math.abs(elevationDelta) >= ORBIT_VIEW_ELEVATION_DEADBAND_DEG) {
+    _orbitViewElevation += elevationDelta * ORBIT_VIEW_ELEVATION_EMA;
+  }
+}
+
 function applyHeadingRateLimit(targetHeading, dtSec) {
   if (!_hasOutputHeading) {
     _lastOutputHeading = targetHeading;
@@ -1801,6 +1831,7 @@ function startTracking() {
       _hasOutputHeading = false;
       _headingHoldActive = false;
       _gyroStationarySinceTs = 0;
+      _orbitViewInited = false;
       dlog('calBtn: restarted init phase');
     } else if (_kalInited && _lastAlphaHeading !== null &&
                (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
@@ -1814,6 +1845,7 @@ function startTracking() {
       _hasOutputHeading = false;
       _headingHoldActive = false;
       _gyroStationarySinceTs = 0;
+      _orbitViewInited = false;
       dlog('calBtn: reset smoothing for non-iOS');
     }
     // Flash the button to give tactile feedback
@@ -2677,11 +2709,13 @@ function buildSvgPathD(pts) {
 
 function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfFovV, nowMs, maxEl) {
   var margin = 60;
+  var orbitHeading = _orbitViewInited ? _orbitViewHeading : deviceHeading;
+  var orbitElevation = _orbitViewInited ? _orbitViewElevation : deviceElevation;
 
   // 軌道点を現在の向きでスクリーン座標に変換
   var points = trajectory.map(function(pt) {
-    var azDiff = normalizeAzDiff(pt.az - deviceHeading);
-    var elDiff = pt.el - deviceElevation;
+    var azDiff = normalizeAzDiff(pt.az - orbitHeading);
+    var elDiff = pt.el - orbitElevation;
     return {
       x: screenW / 2 + (azDiff / halfFovH) * (screenW / 2),
       y: screenH / 2 - (elDiff / halfFovV) * (screenH / 2),
@@ -2750,6 +2784,10 @@ function updateOrientationDisplay() {
   var barCenterOffset = compassBar.parentElement.offsetWidth / 2;
   var offset = barCenterOffset - (deviceHeading * tickWidth / 10) - tickWidth / 2;
   compassBar.style.transform = 'translateX(' + offset + 'px)';
+
+  // Orbit arcs are for coarse visual acquisition, so give them a calmer
+  // camera model than the live marker/compass readout.
+  updateOrbitViewOrientation();
 
   // 衛星の見かけ速度 + 端末の回転速度から必要周期だけ更新
   var nowMs = Date.now();
