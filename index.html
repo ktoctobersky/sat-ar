@@ -1259,6 +1259,14 @@ var HEADING_MAX_RATE_DEG_PER_SEC = 220; // 実回転は追従しつつ、瞬間�
 var ORIENTATION_DT_DEFAULT_SEC = 1 / 60;
 var ORIENTATION_DT_MAX_SEC = 0.2;
 var CAL_ALPHA_MAX_AGE_MS = 2000;
+var MOTION_DT_DEFAULT_SEC = 1 / 60;
+var MOTION_DT_MAX_SEC = 0.2;
+var GYRO_RATE_EMA_OLD_WEIGHT = 0.8;
+var GYRO_RATE_EMA_NEW_WEIGHT = 0.2;
+var GYRO_STATIONARY_THRESHOLD_DPS = 1.2;
+var GYRO_MOVING_THRESHOLD_DPS = 3.5;
+var HEADING_HOLD_CAPTURE_DELAY_MS = 180;
+var HEADING_HOLD_RELEASE_DELTA_DEG = 3.5;
 // Compass init phase: collect (alpha, webkitCompassHeading) pairs for
 // INIT_COLLECTION_MS to compute a stable circular-mean compassOffset, then
 // run gyro-primary (OS-fused alpha + fixed offset) with no continuous
@@ -1273,11 +1281,16 @@ var _initStartTs       = 0;
 var _initOffsetSins    = [];
 var _initOffsetCoss    = [];
 var _lastOrientationTs = 0;
+var _lastMotionTs = 0;
 var _lastAlphaHeading = null;
 var _lastAlphaUpdatedTs = 0;
 var _hasOutputHeading = false;
 var _lastOutputHeading = 0;
 var _headingRateDegPerSec = 0;
+var _gyroMotionRateDegPerSec = 0;
+var _gyroStationarySinceTs = 0;
+var _headingHoldActive = false;
+var _heldHeading = 0;
 var _satMotionRateDegPerSec = 0;
 var _lastSatMotionSampleTs = 0;
 var _satMotionSamples = {};          // { norad: { azimuth, elevation } }
@@ -1375,8 +1388,10 @@ document.getElementById('startBtn').addEventListener('click', function() {
         dlog('startBtn: using deviceorientation (fallback)');
       }
     }
-    // DeviceMotion permission kept for future use but no listener needed —
-    // iOS's deviceorientation already provides OS-fused gyro+accel+mag data.
+    if (motionState === 'granted' || motionState === 'not-needed') {
+      window.addEventListener('devicemotion', handleMotion, true);
+      dlog('startBtn: devicemotion listener attached');
+    }
 
     if (orientState === 'denied') {
       dlog('startBtn: both permissions denied (continuing anyway)');
@@ -1554,6 +1569,27 @@ function handleOrientation(e) {
     heading = 0;
   }
   heading = ((heading % 360) + 360) % 360;
+
+  // Use gyroscope energy only as a stationary detector: when the device is
+  // truly still, hold the fused heading to prevent sub-degree compass flutter.
+  var headingHoldDeltaDeg = Math.abs(normalizeAzDiff(heading - _heldHeading));
+  var canCaptureHold = _gyroStationarySinceTs > 0 &&
+    (Date.now() - _gyroStationarySinceTs) >= HEADING_HOLD_CAPTURE_DELAY_MS;
+  if (_headingHoldActive) {
+    if (_gyroMotionRateDegPerSec >= GYRO_MOVING_THRESHOLD_DPS ||
+        headingHoldDeltaDeg >= HEADING_HOLD_RELEASE_DELTA_DEG) {
+      _headingHoldActive = false;
+      _gyroStationarySinceTs = 0;
+    } else {
+      heading = _heldHeading;
+      alphaRateDegPerSec = 0;
+    }
+  } else if (canCaptureHold) {
+    _headingHoldActive = true;
+    _heldHeading = heading;
+    alphaRateDegPerSec = 0;
+  }
+
   _headingRateDegPerSec =
     _headingRateDegPerSec * HEADING_RATE_EMA_OLD_WEIGHT +
     alphaRateDegPerSec * HEADING_RATE_EMA_NEW_WEIGHT;
@@ -1763,6 +1799,8 @@ function startTracking() {
       _kalInited       = false;
       _snappedHeading  = null;
       _hasOutputHeading = false;
+      _headingHoldActive = false;
+      _gyroStationarySinceTs = 0;
       dlog('calBtn: restarted init phase');
     } else if (_kalInited && _lastAlphaHeading !== null &&
                (Date.now() - _lastAlphaUpdatedTs) <= CAL_ALPHA_MAX_AGE_MS) {
@@ -1774,6 +1812,8 @@ function startTracking() {
       _kalHdgPCos = 1.0;
       _snappedHeading  = null;
       _hasOutputHeading = false;
+      _headingHoldActive = false;
+      _gyroStationarySinceTs = 0;
       dlog('calBtn: reset smoothing for non-iOS');
     }
     // Flash the button to give tactile feedback
@@ -1791,6 +1831,41 @@ function startTracking() {
     } catch(e) {}
   }, FORECAST_RECALC_INTERVAL_MS);
   requestAnimationFrame(updateOrientationDisplay);
+}
+
+function handleMotion(e) {
+  var rot = e.rotationRate;
+  if (!rot) return;
+
+  var alpha = (typeof rot.alpha === 'number') ? rot.alpha : 0;
+  var beta = (typeof rot.beta === 'number') ? rot.beta : 0;
+  var gamma = (typeof rot.gamma === 'number') ? rot.gamma : 0;
+  var rateMag = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
+  if (!isFinite(rateMag)) return;
+
+  var nowTs = (typeof e.timeStamp === 'number') ? e.timeStamp : Date.now();
+  var dtSec = _lastMotionTs > 0 ? (nowTs - _lastMotionTs) / 1000 : MOTION_DT_DEFAULT_SEC;
+  _lastMotionTs = nowTs;
+  if (!(dtSec > 0)) dtSec = MOTION_DT_DEFAULT_SEC;
+  if (dtSec > MOTION_DT_MAX_SEC) dtSec = MOTION_DT_MAX_SEC;
+
+  var normalizedRate = rateMag;
+  if (dtSec > 0) {
+    // Keep the stationary threshold stable even when motion samples arrive sparsely.
+    normalizedRate = Math.min(rateMag, rateMag * (MOTION_DT_DEFAULT_SEC / dtSec));
+  }
+
+  _gyroMotionRateDegPerSec =
+    _gyroMotionRateDegPerSec * GYRO_RATE_EMA_OLD_WEIGHT +
+    normalizedRate * GYRO_RATE_EMA_NEW_WEIGHT;
+
+  var nowWall = Date.now();
+  if (_gyroMotionRateDegPerSec <= GYRO_STATIONARY_THRESHOLD_DPS) {
+    if (_gyroStationarySinceTs === 0) _gyroStationarySinceTs = nowWall;
+  } else if (_gyroMotionRateDegPerSec >= GYRO_MOVING_THRESHOLD_DPS) {
+    _gyroStationarySinceTs = 0;
+    _headingHoldActive = false;
+  }
 }
 
 function computeSatPosition(sat, date) {
