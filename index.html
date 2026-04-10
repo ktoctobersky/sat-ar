@@ -1227,6 +1227,18 @@ var observerLabel = '---';
 var deviceHeading = 0;
 var deviceElevation = 0;
 
+// Orbit arc dedicated viewpoint – separate from the live heading display so
+// that micro-noise in the sensor does not shake the entire orbital trajectory.
+// Dead-band: changes smaller than the threshold are silently ignored.
+// Only deltas that exceed the threshold are tracked, and even then the view
+// follows with a gentle EMA so the arc glides rather than snaps.
+var ORBIT_HEADING_DEADBAND_DEG   = 1.5;  // heading delta below this is ignored
+var ORBIT_ELEVATION_DEADBAND_DEG = 1.0;  // elevation delta below this is ignored
+var ORBIT_HEADING_EMA_K          = 0.08; // EMA gain for orbit arc heading
+var ORBIT_ELEVATION_EMA_K        = 0.10; // EMA gain for orbit arc elevation
+var _orbitViewHeading   = null;          // null until first valid orientation
+var _orbitViewElevation = null;
+
 // 1D Kalman filter for heading/elevation smoothing (applied per-axis on sin/cos for
 // angle-wrap safety).  Replaces the prior adaptive EMA as the primary smoothing stage.
 //
@@ -1730,6 +1742,31 @@ function snapHeadingByStepWithHysteresis(heading) {
   return _snappedHeading;
 }
 
+// Update the orbit-arc dedicated viewpoint from the current deviceHeading /
+// deviceElevation.  Changes smaller than the dead-band thresholds are silently
+// discarded so that micro-noise in the sensor does not shake the whole arc.
+// Larger changes are absorbed gradually via EMA so the arc glides smoothly.
+function updateOrbitViewpoint() {
+  if (_orbitViewHeading === null) {
+    // First valid reading – seed directly from the live values.
+    _orbitViewHeading   = deviceHeading;
+    _orbitViewElevation = deviceElevation;
+    return;
+  }
+
+  var hdgDiff = normalizeAzDiff(deviceHeading - _orbitViewHeading);
+  if (Math.abs(hdgDiff) >= ORBIT_HEADING_DEADBAND_DEG) {
+    _orbitViewHeading = ((_orbitViewHeading + hdgDiff * ORBIT_HEADING_EMA_K) % 360 + 360) % 360;
+  }
+
+  var elDiff = deviceElevation - _orbitViewElevation;
+  if (Math.abs(elDiff) >= ORBIT_ELEVATION_DEADBAND_DEG) {
+    _orbitViewElevation += elDiff * ORBIT_ELEVATION_EMA_K;
+    if (_orbitViewElevation > 90)  _orbitViewElevation = 90;
+    if (_orbitViewElevation < -90) _orbitViewElevation = -90;
+  }
+}
+
 async function requestCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     throw new Error('このブラウザはカメラをサポートしていません');
@@ -1816,6 +1853,9 @@ function startTracking() {
       _gyroStationarySinceTs = 0;
       dlog('calBtn: reset smoothing for non-iOS');
     }
+    // Reset orbit-arc dedicated viewpoint so it re-seeds from fresh heading.
+    _orbitViewHeading   = null;
+    _orbitViewElevation = null;
     // Flash the button to give tactile feedback
     btn.classList.add('flash');
     setTimeout(function() { btn.classList.remove('flash'); }, 600);
@@ -2678,10 +2718,15 @@ function buildSvgPathD(pts) {
 function updateOrbitSvgPath(elems, trajectory, screenW, screenH, halfFovH, halfFovV, nowMs, maxEl) {
   var margin = 60;
 
-  // 軌道点を現在の向きでスクリーン座標に変換
+  // 軌道弧は専用の安定化済み視点で投影する。_orbitViewHeading/Elevation は
+  // dead-band + EMA で微小ノイズを吸収した値なので、arc がブルブルしない。
+  var orbitHdg = (_orbitViewHeading !== null) ? _orbitViewHeading : deviceHeading;
+  var orbitEl  = (_orbitViewElevation !== null) ? _orbitViewElevation : deviceElevation;
+
+  // 軌道点を軌道弧専用の視点でスクリーン座標に変換
   var points = trajectory.map(function(pt) {
-    var azDiff = normalizeAzDiff(pt.az - deviceHeading);
-    var elDiff = pt.el - deviceElevation;
+    var azDiff = normalizeAzDiff(pt.az - orbitHdg);
+    var elDiff = pt.el - orbitEl;
     return {
       x: screenW / 2 + (azDiff / halfFovH) * (screenW / 2),
       y: screenH / 2 - (elDiff / halfFovV) * (screenH / 2),
@@ -2753,6 +2798,7 @@ function updateOrientationDisplay() {
 
   // 衛星の見かけ速度 + 端末の回転速度から必要周期だけ更新
   var nowMs = Date.now();
+  updateOrbitViewpoint();
   updateAdaptiveMarkerInterval(nowMs);
   if ((nowMs - _lastMarkerUpdateTs) >= _markerUpdateIntervalMs) {
     positionMarkersAndEdges();
